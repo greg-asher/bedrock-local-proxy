@@ -130,6 +130,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveChatCompletions(w, r)
 		return
 	}
+	if r.URL.Path == "/v1/responses" {
+		s.serveResponses(w, r)
+		return
+	}
 	if r.URL.Path == "/v1/messages" {
 		s.serveMessages(w, r)
 		return
