@@ -14,9 +14,7 @@ V1 completion requires every issue Done, both live client gates passed, and the 
 
 ## Ready
 
-- [03: Complete a non-streaming chat request](03-chat-completions.md)
 - [06: Serve a non-streaming Anthropic Messages request](06-messages-api.md)
-- [11: Build and install locally with one command](11-native-binaries.md)
 
 ## In progress
 
@@ -33,7 +31,8 @@ None.
 
 ## Implemented
 
-None.
+- [03: Complete a non-streaming chat request](03-chat-completions.md)
+- [11: Build and install locally with one command](11-native-binaries.md)
 
 ## Done
 

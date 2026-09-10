@@ -4,16 +4,10 @@ Bedrock Local Proxy exposes a local OpenAI-compatible endpoint backed by Amazon 
 
 ## First local startup
 
-Install Go, then build the current checkout:
+Install Go, then build and install the current checkout:
 
 ```sh
 ./install.sh
-```
-
-The install script is added by issue 11. Until it lands, build and run the command directly:
-
-```sh
-go build -o "$HOME/.local/bin/bedrock-proxy" ./cmd/bedrock-proxy
 ```
 
 The default configuration file is:
@@ -22,7 +16,7 @@ The default configuration file is:
 ~/.config/bedrock-proxy/config.yaml
 ```
 
-Copy `config.example.yaml` there and replace `REPLACE_WITH_YOUR_BEDROCK_MODEL_ID` with a model or inference-profile ID that your AWS account can use. Keep the profile as `Halo-Win-Agent-Execution` and the region as `us-east-2` unless your local configuration intentionally uses another approved profile or region.
+`./install.sh` creates this file from `config.example.yaml` when it is missing. Replace `REPLACE_WITH_YOUR_BEDROCK_MODEL_ID` with a model or inference-profile ID that your AWS account can use. Re-running `./install.sh` updates the binary and preserves the existing configuration byte-for-byte. Keep the profile as `Halo-Win-Agent-Execution` and the region as `us-east-2` unless your local configuration intentionally uses another approved profile or region.
 
 Sign in through the existing AWS CLI profile, then start the proxy:
 
@@ -40,3 +34,13 @@ bedrock-proxy --config ./config.yaml
 ```
 
 Startup proves that the local server is listening and the configuration is valid. The first successful request proves AWS credentials, model access, signing, and the upstream endpoint. The proxy does not automate interactive SSO login and does not store AWS credentials.
+
+## Cross-build checks
+
+The normal install builds only for the current host. To check all supported targets without installing them, run:
+
+```sh
+./scripts/check-build-targets.sh
+```
+
+This checks compilation for `darwin/arm64`, `darwin/amd64`, `linux/amd64`, and `linux/arm64`. The generated binaries are not run during cross-build checks because their runtime platform may differ from the development machine.
