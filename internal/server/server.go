@@ -90,6 +90,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveChatCompletions(w, r)
 		return
 	}
+	if r.URL.Path == "/v1/messages" {
+		s.serveMessages(w, r)
+		return
+	}
 	if r.URL.Path != "/v1/models" {
 		http.NotFound(w, r)
 		return
