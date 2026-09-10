@@ -15,15 +15,16 @@ import (
 )
 
 type Server struct {
-	cfg           config.Config
-	http          *http.Server
-	transport     RequestDoer
-	record        func(CompletionResult)
-	lifecycleMu   sync.Mutex
-	active        map[uint64]context.CancelFunc
-	activeChanged chan struct{}
-	nextRequestID uint64
-	stopping      bool
+	cfg                config.Config
+	http               *http.Server
+	transport          RequestDoer
+	record             func(CompletionResult)
+	lifecycleMu        sync.Mutex
+	active             map[uint64]context.CancelFunc
+	activeChanged      chan struct{}
+	nextRequestID      uint64
+	stopping           bool
+	pendingCompletions int
 }
 
 func New(cfg config.Config) *Server {
@@ -82,13 +83,13 @@ func (s *Server) Handler() http.Handler { return s }
 
 func (s *Server) Serve(l net.Listener) error { return s.http.Serve(l) }
 
-// ActiveRequests reports handlers that did not finish before shutdown's
-// bounded cancellation grace. It is used only to disclose incomplete
-// accounting coverage in the final session summary.
-func (s *Server) ActiveRequests() int {
+// PendingCompletions reports accepted requests whose completion callback has
+// not returned. It is used only to disclose incomplete accounting coverage
+// after the bounded shutdown grace.
+func (s *Server) PendingCompletions() int {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
-	return len(s.active)
+	return s.pendingCompletions
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
@@ -209,6 +210,7 @@ func (s *Server) beginRequest(r *http.Request) (uint64, context.Context, bool) {
 	s.nextRequestID++
 	id := s.nextRequestID
 	s.active[id] = cancel
+	s.pendingCompletions++
 	return id, ctx, true
 }
 
