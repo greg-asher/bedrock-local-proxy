@@ -49,7 +49,7 @@ func TestChatCompletionTransformsRequestUsingOpenAIShape(t *testing.T) {
 	}}
 	s := NewWithTransport(chatTestConfig(), fake)
 
-	requestBody := `{"model":"coding","messages":[{"role":"user","content":"hello","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"n\":9007199254740993123456789}"}}]},{"role":"tool","tool_call_id":"call_1","content":"result"}],"temperature":null,"max_tokens":0,"unknown_number":9007199254740993123456789,"unknown_object":{"nested":true}}`
+	requestBody := `{"model":"coding","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"n\":9007199254740993123456789}"}}]},{"role":"tool","tool_call_id":"call_1","content":"result"}],"temperature":null,"max_tokens":0,"unknown_number":9007199254740993123456789,"unknown_object":{"nested":true}}`
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions?trace=1", strings.NewReader(requestBody))
 	request.Header.Set("Authorization", "Bearer local")
 	recorder := httptest.NewRecorder()
