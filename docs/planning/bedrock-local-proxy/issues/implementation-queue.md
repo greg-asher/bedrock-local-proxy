@@ -14,13 +14,14 @@ V1 completion requires every issue Done, both live client gates passed, and the 
 
 ## Ready
 
+- [04: Stream chat output and cancel abandoned generation](04-chat-streaming.md)
+
 ## In progress
 
 None.
 
 ## Blocked
 
-- [04: Stream chat output and cancel abandoned generation](04-chat-streaming.md) — blocked by [03](03-chat-completions.md).
 - [05: Serve normal and streaming Responses requests](05-responses-api.md) — blocked by [04](04-chat-streaming.md).
 - [07: Stream Anthropic Messages with tool use](07-messages-streaming.md) — blocked by [04](04-chat-streaming.md), [06](06-messages-api.md).
 - [08: Report request usage and a truthful session summary](08-request-accounting.md) — blocked by [05](05-responses-api.md), [07](07-messages-streaming.md).
