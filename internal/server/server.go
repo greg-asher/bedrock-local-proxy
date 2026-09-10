@@ -99,7 +99,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		case <-changed:
 		case <-ctx.Done():
 			s.cancelActiveRequests()
-			return shutdownErr
+			// Cancellation is the final drain step. Wait for every handler to
+			// publish its completion before the caller emits session totals.
+			for {
+				s.lifecycleMu.Lock()
+				if len(s.active) == 0 {
+					s.lifecycleMu.Unlock()
+					return shutdownErr
+				}
+				changed = s.activeChanged
+				s.lifecycleMu.Unlock()
+				<-changed
+			}
 		}
 	}
 }
@@ -120,9 +131,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	requestID, requestContext, accepted := s.beginRequest(r)
 	if !accepted {
+		status := http.StatusServiceUnavailable
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
+		w.WriteHeader(status)
 		_, _ = w.Write([]byte(`{"error":{"message":"proxy is shutting down","type":"server_error"}}`))
+		s.finishCompletion(started, CompletionResult{Endpoint: r.URL.Path, HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 	defer s.endRequest(requestID)
@@ -162,10 +175,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	status := http.StatusOK
+	outcome := CompletionSucceeded
 	if err := json.NewEncoder(w).Encode(modelList{Object: "list", Data: data}); err != nil {
 		status = http.StatusInternalServerError
+		outcome = CompletionFailed
 	}
-	s.finishCompletion(started, CompletionResult{Endpoint: "/v1/models", HTTPStatus: &status, Outcome: CompletionSucceeded})
+	s.finishCompletion(started, CompletionResult{Endpoint: "/v1/models", HTTPStatus: &status, Outcome: outcome})
 }
 
 func (s *Server) beginRequest(r *http.Request) (uint64, context.Context, bool) {

@@ -120,7 +120,7 @@ func (r *Recorder) Record(result server.CompletionResult) {
 		_ = json.NewEncoder(r.w).Encode(entry)
 		return
 	}
-	_, _ = fmt.Fprintf(r.w, "request endpoint=%s model=%s outcome=%s status=%s latency_ms=%.2f usage=%s cost=%s\n", entry.Endpoint, entry.LocalModel, entry.Outcome, statusText(entry.HTTPStatus), entry.LatencyMS, entry.UsageStatus, costText(entry))
+	_, _ = fmt.Fprintf(r.w, "request timestamp=%s endpoint=%s local_model=%s upstream_model=%s outcome=%s status=%s latency_ms=%.2f input_tokens=%s output_tokens=%s usage=%s cost=%s\n", entry.Timestamp, entry.Endpoint, entry.LocalModel, entry.UpstreamModel, entry.Outcome, statusText(entry.HTTPStatus), entry.LatencyMS, tokenText(entry.InputTokens), tokenText(entry.OutputTokens), entry.UsageStatus, costText(entry))
 }
 
 func (r *Recorder) estimate(result server.CompletionResult) (float64, bool) {
@@ -165,4 +165,11 @@ func costText(entry requestRecord) string {
 		return "unavailable"
 	}
 	return fmt.Sprintf("$%.8f (estimated)", *entry.EstimatedCost)
+}
+
+func tokenText(value *int64) string {
+	if value == nil {
+		return "unavailable"
+	}
+	return fmt.Sprintf("%d", *value)
 }
