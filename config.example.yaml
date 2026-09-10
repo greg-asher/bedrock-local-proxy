@@ -1,0 +1,16 @@
+version: 1
+
+aws:
+  profile: Halo-Win-Agent-Execution
+  region: us-east-2
+
+listen: 127.0.0.1:8787
+
+models:
+  coding:
+    display_name: Replace me
+    bedrock_model_id: REPLACE_WITH_YOUR_BEDROCK_MODEL_ID
+    input_per_million: 0
+    output_per_million: 0
+    temperature: 0.2
+    max_tokens: 8192

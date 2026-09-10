@@ -1,0 +1,64 @@
+// Package server provides the local HTTP surface that does not require AWS.
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"net"
+	"net/http"
+	"sort"
+
+	"github.com/gregasher/bedrock-local-proxy/internal/config"
+)
+
+type Server struct {
+	cfg  config.Config
+	http *http.Server
+}
+
+func New(cfg config.Config) *Server {
+	s := &Server{cfg: cfg}
+	s.http = &http.Server{Handler: s}
+	return s
+}
+
+func (s *Server) Handler() http.Handler { return s }
+
+func (s *Server) Serve(l net.Listener) error { return s.http.Serve(l) }
+
+func (s *Server) Shutdown(ctx context.Context) error { return s.http.Shutdown(ctx) }
+
+type modelList struct {
+	Object string        `json:"object"`
+	Data   []modelRecord `json:"data"`
+}
+
+type modelRecord struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created"`
+	Owner   string `json:"owned_by"`
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/v1/models" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	names := make([]string, 0, len(s.cfg.Models))
+	for name := range s.cfg.Models {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	data := make([]modelRecord, 0, len(names))
+	for _, name := range names {
+		data = append(data, modelRecord{ID: name, Object: "model", Owner: "bedrock-local-proxy"})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(modelList{Object: "list", Data: data})
+}
