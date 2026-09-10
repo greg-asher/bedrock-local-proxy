@@ -14,8 +14,6 @@ V1 completion requires every issue Done, both live client gates passed, and the 
 
 ## Ready
 
-- [06: Serve a non-streaming Anthropic Messages request](06-messages-api.md)
-
 ## In progress
 
 None.
@@ -33,6 +31,7 @@ None.
 
 ## Done
 
+- [06: Serve a non-streaming Anthropic Messages request](06-messages-api.md)
 - [03: Complete a non-streaming chat request](03-chat-completions.md)
 - [01: Start locally and list configured models](01-local-startup.md)
 - [02: Send signed requests using the developer’s AWS credentials](02-signed-aws-transport.md)
