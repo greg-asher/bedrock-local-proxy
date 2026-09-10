@@ -7,8 +7,10 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"sync"
 
 	"github.com/gregasher/bedrock-local-proxy/internal/config"
+	"github.com/gregasher/bedrock-local-proxy/internal/transport"
 )
 
 type Server struct {
@@ -19,9 +21,34 @@ type Server struct {
 }
 
 func New(cfg config.Config) *Server {
-	s := &Server{cfg: cfg}
+	s := &Server{cfg: cfg, transport: &lazyTransport{profile: cfg.AWS.Profile, region: cfg.AWS.Region}}
 	s.http = &http.Server{Handler: s}
 	return s
+}
+
+// lazyTransport keeps local startup independent of AWS session state. The
+// SDK provider chain is loaded on the first generation request, and the SDK
+// retrieves credentials only when that request is signed.
+type lazyTransport struct {
+	profile string
+	region  string
+	mu      sync.Mutex
+	inner   RequestDoer
+}
+
+func (l *lazyTransport) Do(ctx context.Context, request *http.Request) (*http.Response, error) {
+	l.mu.Lock()
+	if l.inner == nil {
+		inner, err := transport.New(context.Background(), l.profile, l.region)
+		if err != nil {
+			l.mu.Unlock()
+			return nil, err
+		}
+		l.inner = inner
+	}
+	inner := l.inner
+	l.mu.Unlock()
+	return inner.Do(ctx, request)
 }
 
 // NewWithTransport constructs a server with the shared AWS transport (or a
