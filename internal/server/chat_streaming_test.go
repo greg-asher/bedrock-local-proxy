@@ -112,11 +112,13 @@ func TestChatStreamingMalformedOrOversizedUsageDoesNotBreakTerminalDetection(t *
 	const malformed = "data: {\"id\":\"chatcmpl_bad\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":\"many\"}}\n\n"
 	const terminal = "data: {\"id\":\"chatcmpl_final\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":7,\"total_tokens\":19}}\n\ndata: [DONE]\n\n"
 	for _, tt := range []struct {
-		name string
-		body string
+		name       string
+		body       string
+		wantInput  *int64
+		wantOutput *int64
 	}{
 		{name: "oversized record", body: oversized + terminal},
-		{name: "malformed usage", body: malformed + terminal},
+		{name: "malformed usage", body: malformed + terminal, wantInput: int64Pointer(12), wantOutput: int64Pointer(7)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeRequestDoer{response: &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(tt.body))}}
@@ -131,8 +133,8 @@ func TestChatStreamingMalformedOrOversizedUsageDoesNotBreakTerminalDetection(t *
 			if result.Outcome != CompletionSucceeded {
 				t.Fatalf("completion result = %+v, want terminal success despite observer failure", result)
 			}
-			if result.InputTokens != nil || result.OutputTokens != nil {
-				t.Fatalf("invalid usage became token totals: %+v", result)
+			if !sameInt64Pointer(result.InputTokens, tt.wantInput) || !sameInt64Pointer(result.OutputTokens, tt.wantOutput) {
+				t.Fatalf("usage result = %+v, want input=%v output=%v", result, tt.wantInput, tt.wantOutput)
 			}
 		})
 	}
@@ -147,6 +149,8 @@ func TestChatStreamingNullUsageCountsRemainUnknownAndZeroRemainsKnown(t *testing
 	}{
 		{name: "null input", usage: `{"prompt_tokens":null,"completion_tokens":7,"total_tokens":7}`, wantOutput: int64Pointer(7)},
 		{name: "null output", usage: `{"prompt_tokens":0,"completion_tokens":null,"total_tokens":0}`, wantInput: int64Pointer(0)},
+		{name: "malformed input", usage: `{"prompt_tokens":"many","completion_tokens":7,"total_tokens":7}`, wantOutput: int64Pointer(7)},
+		{name: "malformed output", usage: `{"prompt_tokens":0,"completion_tokens":"many","total_tokens":0}`, wantInput: int64Pointer(0)},
 		{name: "zero counts", usage: `{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}`, wantInput: int64Pointer(0), wantOutput: int64Pointer(0)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

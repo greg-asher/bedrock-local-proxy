@@ -461,7 +461,7 @@ func (o *chatStreamObserver) observe(event sseEvent) {
 	if raw, ok := usage["prompt_tokens"]; ok {
 		value, valid := decodeOptionalInt64(raw)
 		if !valid {
-			o.usageInvalid = true
+			o.inputTokens = nil
 		} else {
 			o.inputTokens = value
 		}
@@ -469,7 +469,7 @@ func (o *chatStreamObserver) observe(event sseEvent) {
 	if raw, ok := usage["completion_tokens"]; ok {
 		value, valid := decodeOptionalInt64(raw)
 		if !valid {
-			o.usageInvalid = true
+			o.outputTokens = nil
 		} else {
 			o.outputTokens = value
 		}
