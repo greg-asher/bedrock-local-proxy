@@ -160,7 +160,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path != "/v1/models" {
+		status := http.StatusNotFound
 		http.NotFound(w, r)
+		s.finishCompletion(started, CompletionResult{Endpoint: r.URL.Path, HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 	if r.Method != http.MethodGet {
