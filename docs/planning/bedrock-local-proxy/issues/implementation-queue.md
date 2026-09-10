@@ -32,7 +32,8 @@ None.
 
 ## Implemented
 
-None.
+- [01: Start locally and list configured models](01-local-startup.md) — awaiting repair [12](12-repair-local-startup.md) before review can mark it Done.
+- [12: Repair local startup evidence and endpoint reporting](12-repair-local-startup.md)
 
 ## Done
 
