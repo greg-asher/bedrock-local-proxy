@@ -14,6 +14,8 @@ V1 completion requires every issue Done, both live client gates passed, and the 
 
 ## Ready
 
+- [15: Treat null usage counts as unknown](15-repair-null-usage-counts.md)
+
 ## In progress
 
 None.
