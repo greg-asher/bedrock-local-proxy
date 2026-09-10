@@ -15,7 +15,6 @@ V1 completion requires every issue Done, both live client gates passed, and the 
 ## Ready
 
 - [06: Serve a non-streaming Anthropic Messages request](06-messages-api.md)
-- [14: Repair the OpenAI tool-call contract fixture](14-repair-openai-tool-fixture.md)
 
 ## In progress
 
@@ -32,12 +31,12 @@ None.
 
 ## Implemented
 
-- [03: Complete a non-streaming chat request](03-chat-completions.md)
-- [11: Build and install locally with one command](11-native-binaries.md)
-
 ## Done
 
+- [03: Complete a non-streaming chat request](03-chat-completions.md)
 - [01: Start locally and list configured models](01-local-startup.md)
 - [02: Send signed requests using the developer’s AWS credentials](02-signed-aws-transport.md)
+- [11: Build and install locally with one command](11-native-binaries.md)
+- [14: Repair the OpenAI tool-call contract fixture](14-repair-openai-tool-fixture.md)
 - [12: Repair local startup evidence and endpoint reporting](12-repair-local-startup.md)
 - [13: Repair JSON diagnostics and complete local CLI coverage](13-repair-json-diagnostics-and-cli-coverage.md)
