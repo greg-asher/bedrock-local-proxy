@@ -214,20 +214,10 @@ func parseMessagesUsage(body []byte) (*int64, *int64, bool) {
 	}
 	var inputTokens, outputTokens *int64
 	if raw, ok := response.Usage["input_tokens"]; ok {
-		var value int64
-		if err := json.Unmarshal(raw, &value); err != nil {
-			inputTokens = nil
-		} else {
-			inputTokens = &value
-		}
+		inputTokens, _ = decodeOptionalInt64(raw)
 	}
 	if raw, ok := response.Usage["output_tokens"]; ok {
-		var value int64
-		if err := json.Unmarshal(raw, &value); err != nil {
-			outputTokens = nil
-		} else {
-			outputTokens = &value
-		}
+		outputTokens, _ = decodeOptionalInt64(raw)
 	}
 	uncovered := false
 	for key := range response.Usage {

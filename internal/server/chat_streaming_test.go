@@ -138,6 +138,42 @@ func TestChatStreamingMalformedOrOversizedUsageDoesNotBreakTerminalDetection(t *
 	}
 }
 
+func TestChatStreamingNullUsageCountsRemainUnknownAndZeroRemainsKnown(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		usage      string
+		wantInput  *int64
+		wantOutput *int64
+	}{
+		{name: "null input", usage: `{"prompt_tokens":null,"completion_tokens":7,"total_tokens":7}`, wantOutput: int64Pointer(7)},
+		{name: "null output", usage: `{"prompt_tokens":0,"completion_tokens":null,"total_tokens":0}`, wantInput: int64Pointer(0)},
+		{name: "zero counts", usage: `{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}`, wantInput: int64Pointer(0), wantOutput: int64Pointer(0)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := "data: {\"id\":\"chatcmpl_usage\",\"object\":\"chat.completion.chunk\",\"created\":1730000000,\"model\":\"target\",\"choices\":[],\"usage\":" + tt.usage + "}\n\ndata: [DONE]\n\n"
+			fake := &fakeRequestDoer{response: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}}
+			s := NewWithTransport(chatTestConfig(), fake)
+			var result CompletionResult
+			s.SetCompletionRecorder(func(got CompletionResult) { result = got })
+			recorder := httptest.NewRecorder()
+			s.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"coding","messages":[],"stream":true}`)))
+			if recorder.Code != http.StatusOK || recorder.Body.String() != body {
+				t.Fatalf("response = (%d, %q), want unchanged stream", recorder.Code, recorder.Body.String())
+			}
+			if result.Outcome != CompletionSucceeded {
+				t.Fatalf("completion result = %+v, want terminal success", result)
+			}
+			if !sameInt64Pointer(result.InputTokens, tt.wantInput) || !sameInt64Pointer(result.OutputTokens, tt.wantOutput) {
+				t.Fatalf("usage result = %+v, want input=%v output=%v", result, tt.wantInput, tt.wantOutput)
+			}
+		})
+	}
+}
+
 func TestChatStreamingEOFBeforeDoneAndUpstreamErrorAreFailedWithoutInjectedBody(t *testing.T) {
 	for _, tt := range []struct {
 		name string

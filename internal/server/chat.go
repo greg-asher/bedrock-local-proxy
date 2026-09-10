@@ -459,19 +459,19 @@ func (o *chatStreamObserver) observe(event sseEvent) {
 		return
 	}
 	if raw, ok := usage["prompt_tokens"]; ok {
-		var value int64
-		if err := json.Unmarshal(raw, &value); err != nil {
+		value, valid := decodeOptionalInt64(raw)
+		if !valid {
 			o.usageInvalid = true
 		} else {
-			o.inputTokens = &value
+			o.inputTokens = value
 		}
 	}
 	if raw, ok := usage["completion_tokens"]; ok {
-		var value int64
-		if err := json.Unmarshal(raw, &value); err != nil {
+		value, valid := decodeOptionalInt64(raw)
+		if !valid {
 			o.usageInvalid = true
 		} else {
-			o.outputTokens = &value
+			o.outputTokens = value
 		}
 	}
 	for key := range usage {
@@ -532,6 +532,21 @@ func parseChatUsage(body []byte) (*int64, *int64, bool) {
 	uncovered := len(response.Usage.PromptDetails) > 0 && string(response.Usage.PromptDetails) != "null"
 	uncovered = uncovered || len(response.Usage.CompletionDetails) > 0 && string(response.Usage.CompletionDetails) != "null"
 	return response.Usage.PromptTokens, response.Usage.CompletionTokens, uncovered
+}
+
+// decodeOptionalInt64 preserves the JSON distinction between a valid numeric
+// zero and a null or absent count. A malformed value is invalid and must not
+// become a fabricated token total.
+func decodeOptionalInt64(raw []byte) (*int64, bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil, true
+	}
+	var value int64
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, false
+	}
+	return &value, true
 }
 
 func (s *Server) finishCompletion(started time.Time, result CompletionResult) {

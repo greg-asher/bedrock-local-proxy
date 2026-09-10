@@ -191,6 +191,50 @@ func TestMessagesMalformedUsageRemainsUnknown(t *testing.T) {
 	}
 }
 
+func TestMessagesNullUsageCountsRemainUnknownAndZeroRemainsKnown(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		usage      string
+		wantInput  *int64
+		wantOutput *int64
+	}{
+		{name: "null input", usage: `{"input_tokens":null,"output_tokens":7}`, wantOutput: int64Pointer(7)},
+		{name: "null output", usage: `{"input_tokens":0,"output_tokens":null}`, wantInput: int64Pointer(0)},
+		{name: "zero counts", usage: `{"input_tokens":0,"output_tokens":0}`, wantInput: int64Pointer(0), wantOutput: int64Pointer(0)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			responseBody := `{"id":"msg_test","type":"message","role":"assistant","content":[{"type":"text","text":"hello"}],"model":"target","stop_reason":"end_turn","stop_sequence":null,"usage":` + tt.usage + `}`
+			fake := &fakeRequestDoer{response: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(responseBody)),
+			}}
+			s := NewWithTransport(chatTestConfig(), fake)
+			var result CompletionResult
+			s.SetCompletionRecorder(func(got CompletionResult) { result = got })
+			recorder := httptest.NewRecorder()
+			s.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"coding","messages":[]}`)))
+			if recorder.Code != http.StatusOK || recorder.Body.String() != responseBody {
+				t.Fatalf("response = (%d, %q), want unchanged Messages response", recorder.Code, recorder.Body.String())
+			}
+			if !sameInt64Pointer(result.InputTokens, tt.wantInput) || !sameInt64Pointer(result.OutputTokens, tt.wantOutput) {
+				t.Fatalf("usage result = %+v, want input=%v output=%v", result, tt.wantInput, tt.wantOutput)
+			}
+		})
+	}
+}
+
+func int64Pointer(value int64) *int64 {
+	return &value
+}
+
+func sameInt64Pointer(got, want *int64) bool {
+	if got == nil || want == nil {
+		return got == nil && want == nil
+	}
+	return *got == *want
+}
+
 func TestMessagesCanceledTransportRecordsCanceledOutcome(t *testing.T) {
 	s := NewWithTransport(chatTestConfig(), &fakeRequestDoer{err: &transport.Failure{Class: transport.FailureCanceled}})
 	var result CompletionResult
