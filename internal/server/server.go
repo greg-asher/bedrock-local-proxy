@@ -14,14 +14,24 @@ import (
 )
 
 type Server struct {
-	cfg       config.Config
-	http      *http.Server
-	transport RequestDoer
-	record    func(CompletionResult)
+	cfg           config.Config
+	http          *http.Server
+	transport     RequestDoer
+	record        func(CompletionResult)
+	lifecycleMu   sync.Mutex
+	active        map[uint64]context.CancelFunc
+	activeChanged chan struct{}
+	nextRequestID uint64
+	stopping      bool
 }
 
 func New(cfg config.Config) *Server {
-	s := &Server{cfg: cfg, transport: &lazyTransport{profile: cfg.AWS.Profile, region: cfg.AWS.Region}}
+	s := &Server{
+		cfg:           cfg,
+		transport:     &lazyTransport{profile: cfg.AWS.Profile, region: cfg.AWS.Region},
+		active:        make(map[uint64]context.CancelFunc),
+		activeChanged: make(chan struct{}),
+	}
 	s.http = &http.Server{Handler: s}
 	return s
 }
@@ -71,7 +81,27 @@ func (s *Server) Handler() http.Handler { return s }
 
 func (s *Server) Serve(l net.Listener) error { return s.http.Serve(l) }
 
-func (s *Server) Shutdown(ctx context.Context) error { return s.http.Shutdown(ctx) }
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.lifecycleMu.Lock()
+	s.stopping = true
+	s.lifecycleMu.Unlock()
+	shutdownErr := s.http.Shutdown(ctx)
+	for {
+		s.lifecycleMu.Lock()
+		if len(s.active) == 0 {
+			s.lifecycleMu.Unlock()
+			return shutdownErr
+		}
+		changed := s.activeChanged
+		s.lifecycleMu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			s.cancelActiveRequests()
+			return shutdownErr
+		}
+	}
+}
 
 type modelList struct {
 	Object string        `json:"object"`
@@ -86,6 +116,16 @@ type modelRecord struct {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	requestID, requestContext, accepted := s.beginRequest(r)
+	if !accepted {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"message":"proxy is shutting down","type":"server_error"}}`))
+		return
+	}
+	defer s.endRequest(requestID)
+	*r = *r.WithContext(requestContext)
+
 	if r.URL.Path == "/v1/chat/completions" {
 		s.serveChatCompletions(w, r)
 		return
@@ -114,4 +154,36 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(modelList{Object: "list", Data: data})
+}
+
+func (s *Server) beginRequest(r *http.Request) (uint64, context.Context, bool) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.stopping {
+		return 0, nil, false
+	}
+	ctx, cancel := context.WithCancel(r.Context())
+	s.nextRequestID++
+	id := s.nextRequestID
+	s.active[id] = cancel
+	return id, ctx, true
+}
+
+func (s *Server) endRequest(id uint64) {
+	s.lifecycleMu.Lock()
+	if cancel, ok := s.active[id]; ok {
+		delete(s.active, id)
+		cancel()
+		close(s.activeChanged)
+		s.activeChanged = make(chan struct{})
+	}
+	s.lifecycleMu.Unlock()
+}
+
+func (s *Server) cancelActiveRequests() {
+	s.lifecycleMu.Lock()
+	for _, cancel := range s.active {
+		cancel()
+	}
+	s.lifecycleMu.Unlock()
 }

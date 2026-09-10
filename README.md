@@ -35,6 +35,8 @@ bedrock-proxy --config ./config.yaml
 
 Startup proves that the local server is listening and the configuration is valid. The first successful request proves AWS credentials, model access, signing, and the upstream endpoint. The proxy does not automate interactive SSO login and does not store AWS credentials.
 
+On `SIGINT` or `SIGTERM`, the proxy stops admitting requests and drains active requests for up to five seconds. Streams that remain active at the end of that bounded drain are canceled so their upstream work and response bodies are closed. The five-second drain is an implementation setting and is intentionally not a configuration option.
+
 ## Cross-build checks
 
 The normal install builds only for the current host. To check all supported targets without installing them, run:
