@@ -12,7 +12,7 @@ V1 completion requires every issue Done, both live client gates passed, and the 
 
 ## Ready
 
-- [01: Start locally and list configured models](01-local-startup.md)
+- [02: Send signed requests using the developer’s AWS credentials](02-signed-aws-transport.md)
 
 ## In progress
 
@@ -20,7 +20,7 @@ None.
 
 ## Blocked
 
-- [02: Send signed requests using the developer’s AWS credentials](02-signed-aws-transport.md) — blocked by [01](01-local-startup.md).
+- [11: Build and install locally with one command](11-native-binaries.md) — blocked by [01](01-local-startup.md).
 - [03: Complete a non-streaming chat request](03-chat-completions.md) — blocked by [01](01-local-startup.md), [02](02-signed-aws-transport.md).
 - [04: Stream chat output and cancel abandoned generation](04-chat-streaming.md) — blocked by [03](03-chat-completions.md).
 - [05: Serve normal and streaming Responses requests](05-responses-api.md) — blocked by [04](04-chat-streaming.md).
@@ -29,7 +29,6 @@ None.
 - [08: Report request usage and a truthful session summary](08-request-accounting.md) — blocked by [05](05-responses-api.md), [07](07-messages-streaming.md).
 - [09: Complete the live Pi acceptance scenario](09-pi-acceptance.md) — blocked by [08](08-request-accounting.md), [11](11-native-binaries.md).
 - [10: Verify Claude Code through the Messages endpoint](10-claude-code-acceptance.md) — blocked by [08](08-request-accounting.md), [11](11-native-binaries.md).
-- [11: Build and install locally with one command](11-native-binaries.md) — blocked by [01](01-local-startup.md).
 
 ## Implemented
 
