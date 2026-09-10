@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/gregasher/bedrock-local-proxy/internal/config"
 	"github.com/gregasher/bedrock-local-proxy/internal/transport"
@@ -116,6 +117,7 @@ type modelRecord struct {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	requestID, requestContext, accepted := s.beginRequest(r)
 	if !accepted {
 		w.Header().Set("Content-Type", "application/json")
@@ -145,6 +147,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		w.WriteHeader(http.StatusMethodNotAllowed)
+		status := http.StatusMethodNotAllowed
+		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/models", HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 	names := make([]string, 0, len(s.cfg.Models))
@@ -157,7 +161,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		data = append(data, modelRecord{ID: name, Object: "model", Owner: "bedrock-local-proxy"})
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(modelList{Object: "list", Data: data})
+	status := http.StatusOK
+	if err := json.NewEncoder(w).Encode(modelList{Object: "list", Data: data}); err != nil {
+		status = http.StatusInternalServerError
+	}
+	s.finishCompletion(started, CompletionResult{Endpoint: "/v1/models", HTTPStatus: &status, Outcome: CompletionSucceeded})
 }
 
 func (s *Server) beginRequest(r *http.Request) (uint64, context.Context, bool) {
