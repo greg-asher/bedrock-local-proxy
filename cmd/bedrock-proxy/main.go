@@ -36,11 +36,13 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("bedrock-proxy", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	// Keep the standard parser from writing before we can honor JSON mode.
+	flags.SetOutput(io.Discard)
 	configPath := flags.String("config", "", "path to YAML configuration")
 	logFormat := flags.String("log-format", "text", "log format: text or json")
 	showVersion := flags.Bool("version", false, "print version and exit")
 	if err := flags.Parse(args); err != nil {
+		diagnostic(stderr, requestedLogFormat(args), err)
 		return 2
 	}
 	if *logFormat != "text" && *logFormat != "json" {
@@ -99,6 +101,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	return 0
+}
+
+func requestedLogFormat(args []string) string {
+	for i, arg := range args {
+		if arg == "--log-format=json" || (arg == "--log-format" && i+1 < len(args) && args[i+1] == "json") {
+			return "json"
+		}
+	}
+	return "text"
 }
 
 func startup(stdout io.Writer, format string, cfg config.Config, address string) error {

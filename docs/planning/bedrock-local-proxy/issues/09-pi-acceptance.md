@@ -20,6 +20,8 @@ Authority: [Product Brief](../bedrock-local-proxy-product-brief.docx), plus the 
 
 Brief section 22; user selects Pi, not OpenCode, for full acceptance. This is the live integration gate. Missing AWS session, client installation, or usable model configuration blocks this issue, not earlier implementation. Credential refresh/expiry fault behavior is established by controlled tests; report that separately from live SSO success.
 
+Complete all local implementation and synthetic contract checks without AWS credentials. This issue remains externally blocked only for the live Pi run until the accepted source is available on the AWS-enabled test machine.
+
 ## Done when
 
 - Pi completes a live tool-based edit through localhost and the resulting file change is verified.
