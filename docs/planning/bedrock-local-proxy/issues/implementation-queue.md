@@ -25,8 +25,7 @@ None.
 
 ## Implemented
 
-- [16: Repair accounting metadata and shutdown ordering](16-repair-accounting-evidence.md)
-- [08: Report request usage and a truthful session summary](08-request-accounting.md)
+None.
 
 ## Done
 
@@ -42,3 +41,5 @@ None.
 - [15: Treat null usage counts as unknown](15-repair-null-usage-counts.md)
 - [12: Repair local startup evidence and endpoint reporting](12-repair-local-startup.md)
 - [13: Repair JSON diagnostics and complete local CLI coverage](13-repair-json-diagnostics-and-cli-coverage.md)
+- [16: Repair accounting metadata and shutdown ordering](16-repair-accounting-evidence.md)
+- [08: Report request usage and a truthful session summary](08-request-accounting.md)
