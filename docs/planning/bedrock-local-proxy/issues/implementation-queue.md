@@ -15,6 +15,7 @@ V1 completion requires every issue Done, both live client gates passed, and the 
 ## Ready
 
 - [06: Serve a non-streaming Anthropic Messages request](06-messages-api.md)
+- [14: Repair the OpenAI tool-call contract fixture](14-repair-openai-tool-fixture.md)
 
 ## In progress
 
