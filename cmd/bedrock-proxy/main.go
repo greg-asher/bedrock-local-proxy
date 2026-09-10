@@ -102,6 +102,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if err := srv.Shutdown(ctx); err != nil {
 			diagnostic(stderr, *logFormat, fmt.Errorf("shutdown: %w", err))
 		}
+		accountingRecorder.MarkIncomplete(srv.ActiveRequests())
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, net.ErrClosed) {
 			diagnostic(stderr, *logFormat, err)

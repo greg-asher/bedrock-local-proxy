@@ -24,6 +24,7 @@ type totals struct {
 	knownInputTokens, knownOutputTokens    int64
 	knownEstimatedCost                     float64
 	missingUsageRequests, missingEstimates int
+	incompleteRequests                     int
 }
 
 type Recorder struct {
@@ -63,6 +64,7 @@ type summaryRecord struct {
 	KnownEstimatedCost      float64 `json:"known_estimated_cost"`
 	MissingUsageRequests    int     `json:"missing_usage_requests"`
 	MissingEstimateRequests int     `json:"missing_estimate_requests"`
+	IncompleteRequests      int     `json:"incomplete_requests"`
 	CostStatus              string  `json:"cost_status"`
 }
 
@@ -120,7 +122,7 @@ func (r *Recorder) Record(result server.CompletionResult) {
 		_ = json.NewEncoder(r.w).Encode(entry)
 		return
 	}
-	_, _ = fmt.Fprintf(r.w, "request timestamp=%s endpoint=%s local_model=%s upstream_model=%s outcome=%s status=%s latency_ms=%.2f input_tokens=%s output_tokens=%s usage=%s cost=%s\n", entry.Timestamp, entry.Endpoint, entry.LocalModel, entry.UpstreamModel, entry.Outcome, statusText(entry.HTTPStatus), entry.LatencyMS, tokenText(entry.InputTokens), tokenText(entry.OutputTokens), entry.UsageStatus, costText(entry))
+	_, _ = fmt.Fprintf(r.w, "request event=%s timestamp=%s endpoint=%s local_model=%s upstream_model=%s outcome=%s http_status=%s latency_ms=%.2f input_tokens=%s output_tokens=%s usage_status=%s estimated_cost=%s cost_status=%s\n", entry.Event, entry.Timestamp, entry.Endpoint, entry.LocalModel, entry.UpstreamModel, entry.Outcome, statusText(entry.HTTPStatus), entry.LatencyMS, tokenText(entry.InputTokens), tokenText(entry.OutputTokens), entry.UsageStatus, costText(entry), entry.CostStatus)
 }
 
 func (r *Recorder) estimate(result server.CompletionResult) (float64, bool) {
@@ -136,7 +138,7 @@ func (r *Recorder) WriteSummary() {
 	defer r.mu.Unlock()
 	s := summaryRecord{Event: "summary", RuntimeSeconds: time.Since(r.started).Seconds(), Requests: r.totals.requests, Successes: r.totals.successes, Failures: r.totals.failures,
 		KnownInputTokens: r.totals.knownInputTokens, KnownOutputTokens: r.totals.knownOutputTokens, KnownEstimatedCost: r.totals.knownEstimatedCost,
-		MissingUsageRequests: r.totals.missingUsageRequests, MissingEstimateRequests: r.totals.missingEstimates, CostStatus: "unavailable"}
+		MissingUsageRequests: r.totals.missingUsageRequests, MissingEstimateRequests: r.totals.missingEstimates, IncompleteRequests: r.totals.incompleteRequests, CostStatus: "unavailable"}
 	if r.totals.missingEstimates == 0 && r.totals.requests > 0 {
 		s.CostStatus = "estimated"
 	}
@@ -151,7 +153,19 @@ func (r *Recorder) WriteSummary() {
 	if s.CostStatus == "estimated" {
 		cost = fmt.Sprintf("$%.8f (estimated)", s.KnownEstimatedCost)
 	}
-	_, _ = fmt.Fprintf(r.w, "Session summary runtime=%.1fs requests=%d successes=%d failures=%d known_input_tokens=%d known_output_tokens=%d estimated_cost=%s missing_usage=%d missing_estimates=%d\n", s.RuntimeSeconds, s.Requests, s.Successes, s.Failures, s.KnownInputTokens, s.KnownOutputTokens, cost, s.MissingUsageRequests, s.MissingEstimateRequests)
+	_, _ = fmt.Fprintf(r.w, "Session summary runtime=%.1fs requests=%d successes=%d failures=%d known_input_tokens=%d known_output_tokens=%d estimated_cost=%s missing_usage=%d missing_estimates=%d incomplete_requests=%d\n", s.RuntimeSeconds, s.Requests, s.Successes, s.Failures, s.KnownInputTokens, s.KnownOutputTokens, cost, s.MissingUsageRequests, s.MissingEstimateRequests, s.IncompleteRequests)
+}
+
+// MarkIncomplete records active handlers that did not publish a completion
+// before the bounded shutdown grace expired. They remain outside request
+// totals, so requests still equals successes plus failures.
+func (r *Recorder) MarkIncomplete(count int) {
+	if count < 0 {
+		count = 0
+	}
+	r.mu.Lock()
+	r.totals.incompleteRequests += count
+	r.mu.Unlock()
 }
 
 func statusText(status *int) string {

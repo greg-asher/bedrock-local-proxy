@@ -82,6 +82,15 @@ func (s *Server) Handler() http.Handler { return s }
 
 func (s *Server) Serve(l net.Listener) error { return s.http.Serve(l) }
 
+// ActiveRequests reports handlers that did not finish before shutdown's
+// bounded cancellation grace. It is used only to disclose incomplete
+// accounting coverage in the final session summary.
+func (s *Server) ActiveRequests() int {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	return len(s.active)
+}
+
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.lifecycleMu.Lock()
 	s.stopping = true
