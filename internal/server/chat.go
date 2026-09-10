@@ -575,4 +575,9 @@ func (s *Server) finishCompletion(started time.Time, result CompletionResult) {
 	if s.record != nil {
 		s.record(result)
 	}
+	s.lifecycleMu.Lock()
+	if s.pendingCompletions > 0 {
+		s.pendingCompletions--
+	}
+	s.lifecycleMu.Unlock()
 }
