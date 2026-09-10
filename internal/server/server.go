@@ -147,6 +147,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	requestID, requestContext, accepted := s.beginRequest(r)
 	if !accepted {
+		s.beginUntrackedCompletion()
 		status := http.StatusServiceUnavailable
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -198,6 +199,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		outcome = CompletionFailed
 	}
 	s.finishCompletion(started, CompletionResult{Endpoint: "/v1/models", HTTPStatus: &status, Outcome: outcome})
+}
+
+// beginUntrackedCompletion accounts for a completion emitted for a request
+// rejected during shutdown. It has no active handler entry, but its recorder
+// callback still must be included in the bounded shutdown accounting drain.
+func (s *Server) beginUntrackedCompletion() {
+	s.lifecycleMu.Lock()
+	s.pendingCompletions++
+	s.lifecycleMu.Unlock()
 }
 
 func (s *Server) beginRequest(r *http.Request) (uint64, context.Context, bool) {

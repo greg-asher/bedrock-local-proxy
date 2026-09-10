@@ -1,13 +1,72 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gregasher/bedrock-local-proxy/internal/config"
 )
+
+func TestShutdownRejectionPreservesPendingAcceptedCompletion(t *testing.T) {
+	s := testServer()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	recorded := make(chan CompletionResult, 2)
+	s.SetCompletionRecorder(func(result CompletionResult) {
+		if result.HTTPStatus != nil && *result.HTTPStatus == http.StatusOK {
+			close(entered)
+			<-release
+		}
+		recorded <- result
+	})
+	go func() {
+		defer close(done)
+		s.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	}()
+	defer func() {
+		close(release)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("accepted handler did not finish")
+		}
+		if got := s.PendingCompletions(); got != 0 {
+			t.Errorf("pending after accepted completion = %d, want 0", got)
+		}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("accepted completion did not start")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = s.Shutdown(ctx)
+	if got := s.PendingCompletions(); got != 1 {
+		t.Fatalf("pending after bounded shutdown = %d, want 1", got)
+	}
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("rejected status = %d, want 503", w.Code)
+	}
+	if got := s.PendingCompletions(); got != 1 {
+		t.Errorf("pending after rejection = %d, want 1", got)
+	}
+	select {
+	case result := <-recorded:
+		if result.HTTPStatus == nil || *result.HTTPStatus != http.StatusServiceUnavailable || result.Outcome != CompletionFailed {
+			t.Errorf("rejected completion = %+v", result)
+		}
+	default:
+		t.Error("shutdown rejection was not recorded")
+	}
+}
 
 func testServer() *Server {
 	return New(config.Config{
