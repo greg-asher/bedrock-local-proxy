@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gregasher/bedrock-local-proxy/internal/accounting"
 	"github.com/gregasher/bedrock-local-proxy/internal/config"
 	"github.com/gregasher/bedrock-local-proxy/internal/server"
 )
@@ -77,6 +78,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	srv := server.New(cfg)
+	accountingFormat := accounting.FormatText
+	if *logFormat == "json" {
+		accountingFormat = accounting.FormatJSON
+	}
+	accountingRecorder := accounting.New(stdout, accountingFormat, cfg.Models)
+	srv.SetCompletionRecorder(accountingRecorder.Record)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sig)
@@ -85,6 +92,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		diagnostic(stderr, *logFormat, err)
 		return 1
 	}
+	defer accountingRecorder.WriteSummary()
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 	select {
