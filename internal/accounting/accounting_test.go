@@ -144,6 +144,31 @@ func (integrationDoer) Do(_ context.Context, _ *http.Request) (*http.Response, e
 	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"chatcmpl_test","object":"chat.completion","created":1730000000,"model":"target","choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`))}, nil
 }
 
+type cancelIntegrationDoer struct {
+	started chan struct{}
+}
+
+func (d *cancelIntegrationDoer) Do(ctx context.Context, _ *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: &cancelIntegrationBody{ctx: ctx, started: d.started}}, nil
+}
+
+type cancelIntegrationBody struct {
+	ctx     context.Context
+	started chan struct{}
+}
+
+func (b *cancelIntegrationBody) Read([]byte) (int, error) {
+	select {
+	case <-b.started:
+	default:
+		close(b.started)
+	}
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (b *cancelIntegrationBody) Close() error { return nil }
+
 func TestRecorderReceivesMixedRealEndpointOutcomes(t *testing.T) {
 	inPrice, outPrice := 1.0, 2.0
 	cfg := config.Config{Models: map[string]config.ModelConfig{"coding": {BedrockModelID: "target", InputPerMillion: &inPrice, OutputPerMillion: &outPrice}}}
@@ -167,17 +192,32 @@ func TestRecorderReceivesMixedRealEndpointOutcomes(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("models status = %d", response.Code)
 	}
+	streamDoer := &cancelIntegrationDoer{started: make(chan struct{})}
+	canceledServer := server.NewWithTransport(cfg, streamDoer)
+	canceledServer.SetCompletionRecorder(recorder.Record)
+	requestContext, cancel := context.WithCancel(context.Background())
+	streamDone := make(chan struct{})
+	go func() {
+		defer close(streamDone)
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"coding","messages":[],"stream":true}`)).WithContext(requestContext)
+		canceledServer.ServeHTTP(httptest.NewRecorder(), request)
+	}()
+	select {
+	case <-streamDoer.started:
+	case <-time.After(time.Second):
+		t.Fatal("streaming fake did not start")
+	}
+	cancel()
+	select {
+	case <-streamDone:
+	case <-time.After(time.Second):
+		t.Fatal("canceled stream did not finish")
+	}
+
 	recorder.WriteSummary()
 	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	if len(lines) != 4 {
-		t.Fatalf("records = %d, want chat, messages, models, summary: %q", len(lines), output.String())
-	}
-	var summary summaryRecord
-	if err := json.Unmarshal([]byte(lines[3]), &summary); err != nil {
-		t.Fatal(err)
-	}
-	if summary.Requests != 2 || summary.Successes != 1 || summary.Failures != 1 {
-		t.Fatalf("summary = %+v", summary)
+	if len(lines) != 5 {
+		t.Fatalf("records = %d, want chat, messages, models, canceled stream, summary: %q", len(lines), output.String())
 	}
 	var rejected struct {
 		HTTPStatus int `json:"http_status"`
@@ -187,5 +227,12 @@ func TestRecorderReceivesMixedRealEndpointOutcomes(t *testing.T) {
 	}
 	if rejected.HTTPStatus != http.StatusBadRequest {
 		t.Fatalf("rejected status = %d, want 400", rejected.HTTPStatus)
+	}
+	var summary summaryRecord
+	if err := json.Unmarshal([]byte(lines[4]), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.Requests != 3 || summary.Successes != 1 || summary.Failures != 2 || summary.IncompleteRequests != 0 {
+		t.Fatalf("mixed summary = %+v", summary)
 	}
 }
