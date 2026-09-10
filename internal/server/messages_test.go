@@ -115,7 +115,7 @@ func TestMessagesValidationUsesAnthropicErrorsAndDoesNotCallUpstream(t *testing.
 		{name: "malformed", body: `{`, wantText: "JSON object"},
 		{name: "missing model", body: `{"messages":[]}`, wantText: "model must be"},
 		{name: "unknown model", body: `{"model":"missing","messages":[]}`, wantText: "configured models: coding, fast"},
-		{name: "streaming not ready", body: `{"model":"coding","messages":[],"stream":true}`, wantText: "stream=true"},
+		{name: "stream must be boolean", body: `{"model":"coding","messages":[],"stream":"true"}`, wantText: "stream must be a boolean"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeRequestDoer{}
