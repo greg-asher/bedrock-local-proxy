@@ -28,7 +28,7 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	localModel, payload, err := s.transformMessagesRequest(r)
+	localModel, payload, stream, err := s.transformMessagesRequest(r)
 	if err != nil {
 		s.writeAnthropicError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		s.finishCompletion(started, CompletionResult{
@@ -86,10 +86,15 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 	if body == nil {
 		body = io.NopCloser(strings.NewReader(""))
 	}
+	response.Body = body
 	defer body.Close()
 
 	copyHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
+	if stream {
+		s.serveMessagesStream(w, r, started, localModel, response)
+		return
+	}
 	observed, copyErr := relayAndObserve(w, body, maxUsageObservationBytes)
 	status := response.StatusCode
 	result := CompletionResult{
@@ -111,41 +116,38 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 	s.finishCompletion(started, result)
 }
 
-func (s *Server) transformMessagesRequest(r *http.Request) (string, []byte, error) {
+func (s *Server) transformMessagesRequest(r *http.Request) (string, []byte, bool, error) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		return "", nil, errors.New("could not read request body")
+		return "", nil, false, errors.New("could not read request body")
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	var fields map[string]json.RawMessage
 	if err := dec.Decode(&fields); err != nil || fields == nil {
-		return "", nil, errors.New("request body must be a JSON object")
+		return "", nil, false, errors.New("request body must be a JSON object")
 	}
 	var extra json.RawMessage
 	if err := dec.Decode(&extra); err != io.EOF {
-		return "", nil, errors.New("request body must contain one JSON object")
+		return "", nil, false, errors.New("request body must contain one JSON object")
 	}
 
 	modelRaw, ok := fields["model"]
 	if !ok {
-		return "", nil, errors.New("model must be a nonempty string")
+		return "", nil, false, errors.New("model must be a nonempty string")
 	}
 	var localModel string
 	if err := json.Unmarshal(modelRaw, &localModel); err != nil || strings.TrimSpace(localModel) == "" {
-		return "", nil, errors.New("model must be a nonempty string")
+		return "", nil, false, errors.New("model must be a nonempty string")
 	}
 	model, ok := s.cfg.Models[localModel]
 	if !ok {
-		return localModel, nil, fmt.Errorf("unknown model %q; configured models: %s", localModel, configuredModels(s.cfg))
+		return localModel, nil, false, fmt.Errorf("unknown model %q; configured models: %s", localModel, configuredModels(s.cfg))
 	}
 
 	var stream bool
 	if raw, ok := fields["stream"]; ok {
 		if err := json.Unmarshal(raw, &stream); err != nil {
-			return localModel, nil, errors.New("stream must be a boolean")
-		}
-		if stream {
-			return localModel, nil, errors.New("stream=true is not supported yet")
+			return localModel, nil, false, errors.New("stream must be a boolean")
 		}
 	}
 	fields["model"] = json.RawMessage(strconv.Quote(model.BedrockModelID))
@@ -161,9 +163,9 @@ func (s *Server) transformMessagesRequest(r *http.Request) (string, []byte, erro
 	}
 	transformed, err := json.Marshal(fields)
 	if err != nil {
-		return localModel, nil, errors.New("could not encode request body")
+		return localModel, nil, stream, errors.New("could not encode request body")
 	}
-	return localModel, transformed, nil
+	return localModel, transformed, stream, nil
 }
 
 type anthropicErrorEnvelope struct {
@@ -227,4 +229,113 @@ func parseMessagesUsage(body []byte) (*int64, *int64, bool) {
 		}
 	}
 	return inputTokens, outputTokens, uncovered
+}
+
+// messagesStreamObserver understands the native Anthropic Messages stream.
+// The relay has already delivered every byte to the caller; this observer only
+// extracts terminal state and usage metadata from bounded SSE records.
+type messagesStreamObserver struct {
+	inputTokens  *int64
+	outputTokens *int64
+	uncovered    bool
+	usageInvalid bool
+	sawStop      bool
+	sawError     bool
+}
+
+func (o *messagesStreamObserver) observe(event sseEvent) {
+	if event.Oversized {
+		o.usageInvalid = true
+		return
+	}
+	data := bytes.TrimSpace(event.Data)
+	if len(data) == 0 {
+		return
+	}
+	var envelope struct {
+		Type    string `json:"type"`
+		Message *struct {
+			Usage map[string]json.RawMessage `json:"usage"`
+		} `json:"message"`
+		Usage map[string]json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		o.usageInvalid = true
+		return
+	}
+	switch envelope.Type {
+	case "message_start":
+		if envelope.Message != nil {
+			o.observeUsage(envelope.Message.Usage)
+		}
+	case "message_delta":
+		o.observeUsage(envelope.Usage)
+	case "message_stop":
+		o.sawStop = true
+	case "error":
+		o.sawError = true
+	}
+}
+
+func (o *messagesStreamObserver) observeUsage(usage map[string]json.RawMessage) {
+	if usage == nil {
+		return
+	}
+	if raw, ok := usage["input_tokens"]; ok {
+		value, valid := decodeOptionalInt64(raw)
+		if !valid {
+			o.inputTokens = nil
+		} else {
+			o.inputTokens = value
+		}
+	}
+	if raw, ok := usage["output_tokens"]; ok {
+		value, valid := decodeOptionalInt64(raw)
+		if !valid {
+			o.outputTokens = nil
+		} else {
+			o.outputTokens = value
+		}
+	}
+	for key := range usage {
+		if key != "input_tokens" && key != "output_tokens" {
+			o.uncovered = true
+		}
+	}
+}
+
+func (s *Server) serveMessagesStream(w http.ResponseWriter, r *http.Request, started time.Time, localModel string, response *http.Response) {
+	body := response.Body
+	if body == nil {
+		body = io.NopCloser(strings.NewReader(""))
+	}
+	flusher, _ := w.(http.Flusher)
+	flush := func() {
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	observer := &messagesStreamObserver{}
+	copyErr := relayAndObserveStream(w, flush, body, maxUsageObservationBytes, observer.observe)
+	status := response.StatusCode
+	result := CompletionResult{
+		Endpoint:      "/v1/messages",
+		LocalModel:    localModel,
+		UpstreamModel: configuredTarget(s.cfg, localModel),
+		HTTPStatus:    &status,
+		Outcome:       CompletionFailed,
+	}
+	if !observer.usageInvalid {
+		result.InputTokens = observer.inputTokens
+		result.OutputTokens = observer.outputTokens
+		result.ObservedUncoveredBillingFields = observer.uncovered
+	}
+	normalEnd := copyErr == nil || errors.Is(copyErr, io.EOF)
+	if response.StatusCode >= 200 && response.StatusCode < 300 && normalEnd && observer.sawStop && !observer.sawError {
+		result.Outcome = CompletionSucceeded
+	}
+	if errors.Is(r.Context().Err(), context.Canceled) || errors.Is(copyErr, context.Canceled) {
+		result.Outcome = CompletionCanceled
+	}
+	s.finishCompletion(started, result)
 }
