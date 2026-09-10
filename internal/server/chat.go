@@ -53,28 +53,34 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		status := http.StatusMethodNotAllowed
+		w.WriteHeader(status)
 		s.finishCompletion(started, CompletionResult{
-			Endpoint: "/v1/chat/completions",
-			Outcome:  CompletionFailed,
+			Endpoint:   "/v1/chat/completions",
+			HTTPStatus: &status,
+			Outcome:    CompletionFailed,
 		})
 		return
 	}
 
 	localModel, payload, stream, err := s.transformChatRequest(r)
 	if err != nil {
-		s.writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		status := http.StatusBadRequest
+		s.writeOpenAIError(w, status, err.Error(), "invalid_request_error")
 		s.finishCompletion(started, CompletionResult{
 			Endpoint:   "/v1/chat/completions",
+			HTTPStatus: &status,
 			LocalModel: localModel,
 			Outcome:    CompletionFailed,
 		})
 		return
 	}
 	if s.transport == nil {
-		s.writeOpenAIError(w, http.StatusBadGateway, "AWS transport is not configured", "upstream_error")
+		status := http.StatusBadGateway
+		s.writeOpenAIError(w, status, "AWS transport is not configured", "upstream_error")
 		s.finishCompletion(started, CompletionResult{
 			Endpoint:   "/v1/chat/completions",
+			HTTPStatus: &status,
 			LocalModel: localModel,
 			Outcome:    CompletionFailed,
 		})
@@ -83,8 +89,9 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, "/openai/v1/chat/completions"+querySuffix(r), bytes.NewReader(payload))
 	if err != nil {
-		s.writeOpenAIError(w, http.StatusBadGateway, "could not create upstream request", "upstream_error")
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: localModel, Outcome: CompletionFailed})
+		status := http.StatusBadGateway
+		s.writeOpenAIError(w, status, "could not create upstream request", "upstream_error")
+		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: localModel, HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 	upstreamRequest.Header = r.Header.Clone()
@@ -93,16 +100,18 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 	response, err := s.transport.Do(r.Context(), upstreamRequest)
 	if err != nil {
 		s.writeTransportError(w, err)
+		status := transportErrorStatus(err)
 		outcome := CompletionFailed
 		if errors.Is(err, context.Canceled) || transport.ClassOf(err) == transport.FailureCanceled {
 			outcome = CompletionCanceled
 		}
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: localModel, UpstreamModel: configuredTarget(s.cfg, localModel), Outcome: outcome})
+		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: localModel, UpstreamModel: configuredTarget(s.cfg, localModel), HTTPStatus: &status, Outcome: outcome})
 		return
 	}
 	if response == nil {
-		s.writeOpenAIError(w, http.StatusBadGateway, "AWS upstream returned no response", "upstream_error")
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: localModel, UpstreamModel: configuredTarget(s.cfg, localModel), Outcome: CompletionFailed})
+		status := http.StatusBadGateway
+		s.writeOpenAIError(w, status, "AWS upstream returned no response", "upstream_error")
+		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: localModel, UpstreamModel: configuredTarget(s.cfg, localModel), HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 	body := response.Body
@@ -215,17 +224,24 @@ func configuredModels(cfg config.Config) string {
 }
 
 func (s *Server) writeTransportError(w http.ResponseWriter, err error) {
-	status := http.StatusBadGateway
+	status := transportErrorStatus(err)
 	message := "AWS upstream request failed"
 	switch transport.ClassOf(err) {
 	case transport.FailureCredentialsExpired:
-		status = http.StatusUnauthorized
 		message = fmt.Sprintf("AWS authentication expired for profile %s. Run: aws sso login --profile %s", s.cfg.AWS.Profile, s.cfg.AWS.Profile)
 	case transport.FailureCredentialsUnavailable:
-		status = http.StatusUnauthorized
 		message = fmt.Sprintf("AWS credentials are unavailable for profile %s", s.cfg.AWS.Profile)
 	}
 	s.writeOpenAIError(w, status, message, "upstream_error")
+}
+
+func transportErrorStatus(err error) int {
+	switch transport.ClassOf(err) {
+	case transport.FailureCredentialsExpired, transport.FailureCredentialsUnavailable:
+		return http.StatusUnauthorized
+	default:
+		return http.StatusBadGateway
+	}
 }
 
 func (s *Server) writeOpenAIError(w http.ResponseWriter, status int, message, kind string) {
@@ -519,19 +535,24 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, started
 
 func parseChatUsage(body []byte) (*int64, *int64, bool) {
 	var response struct {
-		Usage *struct {
-			PromptTokens      *int64          `json:"prompt_tokens"`
-			CompletionTokens  *int64          `json:"completion_tokens"`
-			PromptDetails     json.RawMessage `json:"prompt_tokens_details"`
-			CompletionDetails json.RawMessage `json:"completion_tokens_details"`
-		} `json:"usage"`
+		Usage map[string]json.RawMessage `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil || response.Usage == nil {
 		return nil, nil, false
 	}
-	uncovered := len(response.Usage.PromptDetails) > 0 && string(response.Usage.PromptDetails) != "null"
-	uncovered = uncovered || len(response.Usage.CompletionDetails) > 0 && string(response.Usage.CompletionDetails) != "null"
-	return response.Usage.PromptTokens, response.Usage.CompletionTokens, uncovered
+	input, _ := decodeOptionalInt64(response.Usage["prompt_tokens"])
+	output, _ := decodeOptionalInt64(response.Usage["completion_tokens"])
+	uncovered := false
+	for key, raw := range response.Usage {
+		if key == "prompt_tokens" || key == "completion_tokens" || key == "total_tokens" {
+			continue
+		}
+		if (key == "prompt_tokens_details" || key == "completion_tokens_details") && string(bytes.TrimSpace(raw)) == "null" {
+			continue
+		}
+		uncovered = true
+	}
+	return input, output, uncovered
 }
 
 // decodeOptionalInt64 preserves the JSON distinction between a valid numeric

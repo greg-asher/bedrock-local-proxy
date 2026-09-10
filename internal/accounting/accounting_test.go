@@ -3,8 +3,11 @@ package accounting
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -132,5 +135,57 @@ func TestTextRecordsDoNotContainPromptOrHeaderContent(t *testing.T) {
 		if strings.TrimSpace(scanner.Text()) == "" {
 			t.Fatal("empty accounting line")
 		}
+	}
+}
+
+type integrationDoer struct{}
+
+func (integrationDoer) Do(_ context.Context, _ *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"chatcmpl_test","object":"chat.completion","created":1730000000,"model":"target","choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`))}, nil
+}
+
+func TestRecorderReceivesMixedRealEndpointOutcomes(t *testing.T) {
+	inPrice, outPrice := 1.0, 2.0
+	cfg := config.Config{Models: map[string]config.ModelConfig{"coding": {BedrockModelID: "target", InputPerMillion: &inPrice, OutputPerMillion: &outPrice}}}
+	var output bytes.Buffer
+	recorder := New(&output, FormatJSON, cfg.Models)
+	s := server.NewWithTransport(cfg, integrationDoer{})
+	s.SetCompletionRecorder(recorder.Record)
+
+	response := httptest.NewRecorder()
+	s.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"coding","messages":[]}`)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("chat status = %d", response.Code)
+	}
+	response = httptest.NewRecorder()
+	s.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{`)))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("messages status = %d", response.Code)
+	}
+	response = httptest.NewRecorder()
+	s.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("models status = %d", response.Code)
+	}
+	recorder.WriteSummary()
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("records = %d, want chat, messages, models, summary: %q", len(lines), output.String())
+	}
+	var summary summaryRecord
+	if err := json.Unmarshal([]byte(lines[3]), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.Requests != 2 || summary.Successes != 1 || summary.Failures != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	var rejected struct {
+		HTTPStatus int `json:"http_status"`
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &rejected); err != nil {
+		t.Fatal(err)
+	}
+	if rejected.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("rejected status = %d, want 400", rejected.HTTPStatus)
 	}
 }

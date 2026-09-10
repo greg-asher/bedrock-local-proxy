@@ -23,25 +23,30 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/messages", Outcome: CompletionFailed})
+		status := http.StatusMethodNotAllowed
+		w.WriteHeader(status)
+		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/messages", HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 
 	localModel, payload, stream, err := s.transformMessagesRequest(r)
 	if err != nil {
-		s.writeAnthropicError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		status := http.StatusBadRequest
+		s.writeAnthropicError(w, status, err.Error(), "invalid_request_error")
 		s.finishCompletion(started, CompletionResult{
 			Endpoint:   "/v1/messages",
+			HTTPStatus: &status,
 			LocalModel: localModel,
 			Outcome:    CompletionFailed,
 		})
 		return
 	}
 	if s.transport == nil {
-		s.writeAnthropicError(w, http.StatusBadGateway, "AWS transport is not configured", "api_error")
+		status := http.StatusBadGateway
+		s.writeAnthropicError(w, status, "AWS transport is not configured", "api_error")
 		s.finishCompletion(started, CompletionResult{
 			Endpoint:   "/v1/messages",
+			HTTPStatus: &status,
 			LocalModel: localModel,
 			Outcome:    CompletionFailed,
 		})
@@ -50,8 +55,9 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 
 	upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, "/anthropic/v1/messages"+querySuffix(r), bytes.NewReader(payload))
 	if err != nil {
-		s.writeAnthropicError(w, http.StatusBadGateway, "could not create upstream request", "api_error")
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/messages", LocalModel: localModel, Outcome: CompletionFailed})
+		status := http.StatusBadGateway
+		s.writeAnthropicError(w, status, "could not create upstream request", "api_error")
+		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/messages", LocalModel: localModel, HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 	upstreamRequest.Header = r.Header.Clone()
@@ -60,6 +66,7 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 	response, err := s.transport.Do(r.Context(), upstreamRequest)
 	if err != nil {
 		s.writeAnthropicTransportError(w, err)
+		status := transportErrorStatus(err)
 		outcome := CompletionFailed
 		if errors.Is(err, context.Canceled) || transport.ClassOf(err) == transport.FailureCanceled {
 			outcome = CompletionCanceled
@@ -68,16 +75,19 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 			Endpoint:      "/v1/messages",
 			LocalModel:    localModel,
 			UpstreamModel: configuredTarget(s.cfg, localModel),
+			HTTPStatus:    &status,
 			Outcome:       outcome,
 		})
 		return
 	}
 	if response == nil {
-		s.writeAnthropicError(w, http.StatusBadGateway, "AWS upstream returned no response", "api_error")
+		status := http.StatusBadGateway
+		s.writeAnthropicError(w, status, "AWS upstream returned no response", "api_error")
 		s.finishCompletion(started, CompletionResult{
 			Endpoint:      "/v1/messages",
 			LocalModel:    localModel,
 			UpstreamModel: configuredTarget(s.cfg, localModel),
+			HTTPStatus:    &status,
 			Outcome:       CompletionFailed,
 		})
 		return

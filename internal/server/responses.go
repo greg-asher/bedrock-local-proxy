@@ -23,27 +23,31 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/responses", Outcome: CompletionFailed})
+		status := http.StatusMethodNotAllowed
+		w.WriteHeader(status)
+		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/responses", HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 
 	localModel, payload, stream, err := s.transformResponsesRequest(r)
 	if err != nil {
-		s.writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/responses", LocalModel: localModel, Outcome: CompletionFailed})
+		status := http.StatusBadRequest
+		s.writeOpenAIError(w, status, err.Error(), "invalid_request_error")
+		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/responses", LocalModel: localModel, HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 	if s.transport == nil {
-		s.writeOpenAIError(w, http.StatusBadGateway, "AWS transport is not configured", "upstream_error")
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/responses", LocalModel: localModel, Outcome: CompletionFailed})
+		status := http.StatusBadGateway
+		s.writeOpenAIError(w, status, "AWS transport is not configured", "upstream_error")
+		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/responses", LocalModel: localModel, HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 
 	upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, "/openai/v1/responses"+querySuffix(r), bytes.NewReader(payload))
 	if err != nil {
-		s.writeOpenAIError(w, http.StatusBadGateway, "could not create upstream request", "upstream_error")
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/responses", LocalModel: localModel, Outcome: CompletionFailed})
+		status := http.StatusBadGateway
+		s.writeOpenAIError(w, status, "could not create upstream request", "upstream_error")
+		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/responses", LocalModel: localModel, HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 	upstreamRequest.Header = r.Header.Clone()
@@ -52,6 +56,7 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request) {
 	response, err := s.transport.Do(r.Context(), upstreamRequest)
 	if err != nil {
 		s.writeTransportError(w, err)
+		status := transportErrorStatus(err)
 		outcome := CompletionFailed
 		if errors.Is(err, context.Canceled) || transport.ClassOf(err) == transport.FailureCanceled {
 			outcome = CompletionCanceled
@@ -60,13 +65,15 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request) {
 			Endpoint:      "/v1/responses",
 			LocalModel:    localModel,
 			UpstreamModel: configuredTarget(s.cfg, localModel),
+			HTTPStatus:    &status,
 			Outcome:       outcome,
 		})
 		return
 	}
 	if response == nil {
-		s.writeOpenAIError(w, http.StatusBadGateway, "AWS upstream returned no response", "upstream_error")
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/responses", LocalModel: localModel, UpstreamModel: configuredTarget(s.cfg, localModel), Outcome: CompletionFailed})
+		status := http.StatusBadGateway
+		s.writeOpenAIError(w, status, "AWS upstream returned no response", "upstream_error")
+		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/responses", LocalModel: localModel, UpstreamModel: configuredTarget(s.cfg, localModel), HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 	body := response.Body
