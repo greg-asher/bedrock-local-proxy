@@ -107,6 +107,31 @@ func TestChatCompletionAppliesOnlyAbsentConfiguredDefaults(t *testing.T) {
 	}
 }
 
+func TestChatCompletionDoesNotAddLegacyTokenDefaultAlongsideMaxCompletionTokens(t *testing.T) {
+	fake := &fakeRequestDoer{response: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"id":"chatcmpl-test","object":"chat.completion","created":1730000000,"model":"target","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)),
+	}}
+	s := NewWithTransport(chatTestConfig(), fake)
+	recorder := httptest.NewRecorder()
+	s.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"coding","messages":[],"max_completion_tokens":123}`)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	body, _ := io.ReadAll(fake.request.Body)
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got["max_completion_tokens"]) != "123" {
+		t.Fatalf("explicit max_completion_tokens changed: %s", body)
+	}
+	if _, exists := got["max_tokens"]; exists {
+		t.Fatalf("legacy max_tokens default was added alongside max_completion_tokens: %s", body)
+	}
+}
+
 func TestChatCompletionPreservesResponseAndRecordsUsage(t *testing.T) {
 	const responseBody = `{"id":"chatcmpl-test","object":"chat.completion","created":1730000000,"model":"target","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19,"prompt_tokens_details":{"cached_tokens":2}}}`
 	fake := &fakeRequestDoer{response: &http.Response{
@@ -130,6 +155,13 @@ func TestChatCompletionPreservesResponseAndRecordsUsage(t *testing.T) {
 	}
 	if result.InputTokens == nil || *result.InputTokens != 12 || result.OutputTokens == nil || *result.OutputTokens != 7 || !result.ObservedUncoveredBillingFields {
 		t.Fatalf("usage result = %+v, want token totals and uncovered billing dimension", result)
+	}
+}
+
+func TestUsageParsingTreatsNegativeCountsAsUnknown(t *testing.T) {
+	input, output, uncovered := parseChatUsage([]byte(`{"usage":{"prompt_tokens":-1,"completion_tokens":2,"total_tokens":1}}`))
+	if input != nil || output == nil || *output != 2 || uncovered {
+		t.Fatalf("usage = input:%v output:%v uncovered:%v, want negative input unknown and valid output preserved", input, output, uncovered)
 	}
 }
 

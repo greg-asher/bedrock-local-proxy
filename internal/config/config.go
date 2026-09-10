@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -85,8 +86,14 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.AWS.Profile) == "" {
 		return errors.New("aws.profile is required")
 	}
+	if c.AWS.Profile != strings.TrimSpace(c.AWS.Profile) {
+		return errors.New("aws.profile must not have surrounding whitespace")
+	}
 	if strings.TrimSpace(c.AWS.Region) == "" {
 		return errors.New("aws.region is required")
+	}
+	if c.AWS.Region != strings.TrimSpace(c.AWS.Region) {
+		return errors.New("aws.region must not have surrounding whitespace")
 	}
 	if c.Listen == "" {
 		c.Listen = DefaultListen
@@ -104,17 +111,24 @@ func (c *Config) Validate() error {
 		if strings.TrimSpace(model.BedrockModelID) == "" {
 			return fmt.Errorf("models.%s.bedrock_model_id is required", name)
 		}
-		if model.InputPerMillion != nil && *model.InputPerMillion < 0 {
-			return fmt.Errorf("models.%s.input_per_million must not be negative", name)
+		if model.InputPerMillion != nil && (!finite(*model.InputPerMillion) || *model.InputPerMillion < 0) {
+			return fmt.Errorf("models.%s.input_per_million must be a finite nonnegative number", name)
 		}
-		if model.OutputPerMillion != nil && *model.OutputPerMillion < 0 {
-			return fmt.Errorf("models.%s.output_per_million must not be negative", name)
+		if model.OutputPerMillion != nil && (!finite(*model.OutputPerMillion) || *model.OutputPerMillion < 0) {
+			return fmt.Errorf("models.%s.output_per_million must be a finite nonnegative number", name)
+		}
+		if model.Temperature != nil && !finite(*model.Temperature) {
+			return fmt.Errorf("models.%s.temperature must be finite", name)
 		}
 		if model.MaxTokens != nil && *model.MaxTokens < 0 {
 			return fmt.Errorf("models.%s.max_tokens must not be negative", name)
 		}
 	}
 	return nil
+}
+
+func finite(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 // ValidateListenAddress accepts only loopback TCP addresses. localhost is

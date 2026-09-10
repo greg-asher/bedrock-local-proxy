@@ -284,7 +284,7 @@ func prepareRequest(ctx context.Context, incoming *http.Request, endpoint *url.U
 	stripHopByHopHeaders(out.Header)
 	// Content-Length is represented by Request.ContentLength in net/http. A
 	// stale header from the local client must never survive transformation.
-	out.Header.Del("Content-Length")
+	deleteHeaderFold(out.Header, "Content-Length")
 	return out, body, nil
 }
 
@@ -292,7 +292,7 @@ func stripSensitiveHeaders(header http.Header) {
 	for key := range header {
 		lower := strings.ToLower(key)
 		if lower == "authorization" || lower == "x-api-key" || strings.HasPrefix(lower, "x-amz-") {
-			header.Del(key)
+			delete(header, key)
 		}
 	}
 }
@@ -309,15 +309,27 @@ var hopByHopHeaders = map[string]struct{}{
 }
 
 func stripHopByHopHeaders(header http.Header) {
-	connection := header.Values("Connection")
-	for _, value := range connection {
-		for _, token := range strings.Split(value, ",") {
-			header.Del(strings.TrimSpace(token))
+	for key, values := range header {
+		if !strings.EqualFold(key, "Connection") {
+			continue
+		}
+		for _, value := range values {
+			for _, token := range strings.Split(value, ",") {
+				deleteHeaderFold(header, strings.TrimSpace(token))
+			}
 		}
 	}
 	for key := range header {
 		if _, ok := hopByHopHeaders[strings.ToLower(key)]; ok {
-			header.Del(key)
+			delete(header, key)
+		}
+	}
+}
+
+func deleteHeaderFold(header http.Header, name string) {
+	for key := range header {
+		if strings.EqualFold(key, name) {
+			delete(header, key)
 		}
 	}
 }

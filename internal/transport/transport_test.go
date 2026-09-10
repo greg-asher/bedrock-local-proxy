@@ -207,6 +207,41 @@ func TestDoStripsClientAuthenticationAWSAndHopByHopHeaders(t *testing.T) {
 	}
 }
 
+func TestDoStripsNonCanonicalSensitiveHeaders(t *testing.T) {
+	var got *http.Request
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		got = r
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("ok")), Request: r}, nil
+	})}
+	transport := testTransport(t, "https://bedrock-runtime.us-east-2.amazonaws.com", &fakeProvider{values: []aws.Credentials{{AccessKeyID: "A", SecretAccessKey: "S"}}}, client)
+	request, err := http.NewRequest(http.MethodPost, "https://client.example.invalid/model/x/invoke", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header["authorization"] = []string{"client-secret"}
+	request.Header["x-api-key"] = []string{"client-secret"}
+	request.Header["x-amz-date"] = []string{"old-date"}
+	if _, err := transport.Do(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	for key, values := range got.Header {
+		if strings.EqualFold(key, "x-api-key") || strings.EqualFold(key, "x-amz-date") {
+			for _, value := range values {
+				if value == "client-secret" || value == "old-date" {
+					t.Fatalf("forwarded noncanonical sensitive header %q=%q", key, value)
+				}
+			}
+		}
+		if strings.EqualFold(key, "authorization") {
+			for _, value := range values {
+				if value == "client-secret" {
+					t.Fatalf("forwarded noncanonical authorization header %q=%q", key, value)
+				}
+			}
+		}
+	}
+}
+
 func TestDoIgnoresClientDestinationAndBlocksRedirects(t *testing.T) {
 	var redirected bool
 	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { redirected = true }))

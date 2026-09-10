@@ -190,7 +190,9 @@ func (s *Server) transformChatRequest(r *http.Request) (string, []byte, bool, er
 	}
 	if model.MaxTokens != nil {
 		if _, exists := fields["max_tokens"]; !exists {
-			fields["max_tokens"] = json.RawMessage(strconv.Itoa(*model.MaxTokens))
+			if _, alternate := fields["max_completion_tokens"]; !alternate {
+				fields["max_tokens"] = json.RawMessage(strconv.Itoa(*model.MaxTokens))
+			}
 		}
 	}
 	transformed, err := json.Marshal(fields)
@@ -565,6 +567,9 @@ func decodeOptionalInt64(raw []byte) (*int64, bool) {
 	}
 	var value int64
 	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, false
+	}
+	if value < 0 {
 		return nil, false
 	}
 	return &value, true
