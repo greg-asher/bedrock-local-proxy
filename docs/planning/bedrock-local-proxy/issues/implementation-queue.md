@@ -14,8 +14,6 @@ V1 completion requires every issue Done, both live client gates passed, and the 
 
 ## Ready
 
-- [08: Report request usage and a truthful session summary](08-request-accounting.md)
-
 ## In progress
 
 None.
@@ -26,6 +24,8 @@ None.
 - [10: Verify Claude Code through the Messages endpoint](10-claude-code-acceptance.md) — blocked by [08](08-request-accounting.md), [11](11-native-binaries.md), and the AWS-enabled test machine.
 
 ## Implemented
+
+- [08: Report request usage and a truthful session summary](08-request-accounting.md)
 
 ## Done
 
