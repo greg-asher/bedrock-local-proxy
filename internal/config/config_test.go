@@ -28,6 +28,19 @@ func TestValidateDefaultsListenAndAllowsSharedTarget(t *testing.T) {
 	}
 }
 
+func TestDefaultPathIsHomeScoped(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path, err := DefaultPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, ".config", "bedrock-proxy", "config.yaml")
+	if path != want {
+		t.Fatalf("DefaultPath() = %q, want %q", path, want)
+	}
+}
+
 func TestValidateRejectsNonLoopbackAndInvalidValues(t *testing.T) {
 	tests := []struct {
 		name string

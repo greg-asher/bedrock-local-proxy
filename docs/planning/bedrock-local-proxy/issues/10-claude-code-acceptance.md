@@ -20,6 +20,8 @@ Authority: [Product Brief](../bedrock-local-proxy-product-brief.docx), plus the 
 
 User requested Claude CLI support; the plan interprets this as Claude Code, with a focused compatibility gate distinct from Pi. [Claude Code protocol reference](https://code.claude.com/docs/en/llm-gateway-protocol) guides the checks. No OpenCode requirement, full-feature parity, automatic fallback, or hosted gateway work is included.
 
+Complete all local implementation and synthetic contract checks without AWS credentials. This issue remains externally blocked only for the live Claude Code run until the accepted source is available on the AWS-enabled test machine.
+
 ## Done when
 
 - Claude Code completes a live tool-based edit via /v1/messages using a friendly Claude model and existing AWS identity.

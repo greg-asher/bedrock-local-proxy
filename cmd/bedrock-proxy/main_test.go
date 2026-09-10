@@ -26,6 +26,28 @@ func TestVersionHonorsJSONFormatWithoutConfig(t *testing.T) {
 	}
 }
 
+func TestFlagErrorsHonorRequestedJSONFormat(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--log-format", "json", "--unknown"}, &out, &errOut); code != 2 {
+		t.Fatalf("run() code = %d, want 2", code)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(errOut.Bytes(), &record); err != nil {
+		t.Fatalf("flag diagnostic is not JSON: %v (%q)", err, errOut.String())
+	}
+	if record["event"] != "error" {
+		t.Fatalf("unexpected flag diagnostic: %#v", record)
+	}
+}
+
+func TestRunRejectsNonLoopbackConfigWithoutAWS(t *testing.T) {
+	path := writeTestConfig(t, "0.0.0.0:8787")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--config", path}, &out, &errOut); code == 0 || !strings.Contains(errOut.String(), "not loopback") {
+		t.Fatalf("non-loopback code=%d stderr=%q", code, errOut.String())
+	}
+}
+
 func TestRunRejectsOccupiedPort(t *testing.T) {
 	path := writeTestConfig(t, "127.0.0.1:0")
 	// A first process owns an ephemeral port; a second config points at it.
@@ -56,6 +78,29 @@ func TestRunShutdownViaSIGTERM(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("helper did not shut down cleanly: %v", err)
+	}
+}
+
+func TestRunShutdownViaSIGINT(t *testing.T) {
+	path := writeTestConfig(t, "127.0.0.1:0")
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), "BEDROCK_PROXY_HELPER=1", "BEDROCK_PROXY_CONFIG="+path)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+	if _, err := bufio.NewReader(stdout).ReadString('\n'); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatal(err)
 	}
 	if err := cmd.Wait(); err != nil {

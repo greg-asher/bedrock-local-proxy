@@ -4,6 +4,8 @@ Each issue appears in exactly one state. Ready means no unresolved issue prerequ
 
 Delivery basis: [Product Brief](../bedrock-local-proxy-product-brief.docx), unchanged, plus the user’s clarifications: actual profile `Halo-Win-Agent-Execution`, region `us-east-2`, user-maintained model IDs, Pi acceptance, and Anthropic Messages for Claude Code. The workspace has planning files only. No implementation or live AWS/client validation has been performed.
 
+Local implementation and deterministic contract tests must not require AWS credentials, model access, or network access. Issues 01–08 and 11 can be built and reviewed locally with fake credentials/providers and fake upstreams, but those fakes must use the real AWS, OpenAI, Anthropic, Pi, and Claude Code wire shapes. Issues 09 and 10 contain live-client gates that remain externally blocked until this repository is moved to the AWS-enabled test machine; that external gate does not block local implementation.
+
 The previous six assignments are replaced by these eleven. Endpoint contract verification now belongs to each endpoint issue; there is no all-protocol investigation gate. Protocol issues own their usage parsers, issue 08 owns accounting, and issues 09–10 own live acceptance. Model IDs are not a prerequisite to implementation. Missing credentials or usable configuration can block live acceptance only.
 
 Issue 01 is the initial Ready assignment. Issue 02 follows once the Go module and configuration exist. The first normal OpenAI and Anthropic routes follow independently. Issue 04 establishes the shared streaming lifecycle reused by Responses and Messages. Packaging can begin after local startup and does not wait for AWS access.
@@ -34,6 +36,7 @@ None.
 
 - [01: Start locally and list configured models](01-local-startup.md) — awaiting repair [12](12-repair-local-startup.md) before review can mark it Done.
 - [12: Repair local startup evidence and endpoint reporting](12-repair-local-startup.md)
+- [13: Repair JSON diagnostics and complete local CLI coverage](13-repair-json-diagnostics-and-cli-coverage.md)
 
 ## Done
 
