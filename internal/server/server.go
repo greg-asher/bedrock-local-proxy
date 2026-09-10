@@ -12,14 +12,32 @@ import (
 )
 
 type Server struct {
-	cfg  config.Config
-	http *http.Server
+	cfg       config.Config
+	http      *http.Server
+	transport RequestDoer
+	record    func(CompletionResult)
 }
 
 func New(cfg config.Config) *Server {
 	s := &Server{cfg: cfg}
 	s.http = &http.Server{Handler: s}
 	return s
+}
+
+// NewWithTransport constructs a server with the shared AWS transport (or a
+// local contract fake). Keeping the transport behind this small interface
+// lets endpoint tests use the same request and response shapes without AWS
+// credentials or a network connection.
+func NewWithTransport(cfg config.Config, transport RequestDoer) *Server {
+	s := New(cfg)
+	s.transport = transport
+	return s
+}
+
+// SetCompletionRecorder installs the metadata-only completion callback used
+// by request accounting. It must be configured before serving requests.
+func (s *Server) SetCompletionRecorder(record func(CompletionResult)) {
+	s.record = record
 }
 
 func (s *Server) Handler() http.Handler { return s }
@@ -41,6 +59,10 @@ type modelRecord struct {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/v1/chat/completions" {
+		s.serveChatCompletions(w, r)
+		return
+	}
 	if r.URL.Path != "/v1/models" {
 		http.NotFound(w, r)
 		return
