@@ -61,7 +61,7 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	localModel, payload, err := s.transformChatRequest(r)
+	localModel, payload, stream, err := s.transformChatRequest(r)
 	if err != nil {
 		s.writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		s.finishCompletion(started, CompletionResult{
@@ -110,9 +110,14 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 		body = io.NopCloser(strings.NewReader(""))
 	}
 	defer body.Close()
+	response.Body = body
 
 	copyHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
+	if stream {
+		s.serveChatStream(w, r, started, localModel, response)
+		return
+	}
 	observed, copyErr := relayAndObserve(w, body, maxUsageObservationBytes)
 	status := response.StatusCode
 	result := CompletionResult{
@@ -134,41 +139,38 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 	s.finishCompletion(started, result)
 }
 
-func (s *Server) transformChatRequest(r *http.Request) (string, []byte, error) {
+func (s *Server) transformChatRequest(r *http.Request) (string, []byte, bool, error) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		return "", nil, errors.New("could not read request body")
+		return "", nil, false, errors.New("could not read request body")
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	var fields map[string]json.RawMessage
 	if err := dec.Decode(&fields); err != nil || fields == nil {
-		return "", nil, errors.New("request body must be a JSON object")
+		return "", nil, false, errors.New("request body must be a JSON object")
 	}
 	var extra json.RawMessage
 	if err := dec.Decode(&extra); err != io.EOF {
-		return "", nil, errors.New("request body must contain one JSON object")
+		return "", nil, false, errors.New("request body must contain one JSON object")
 	}
 
 	modelRaw, ok := fields["model"]
 	if !ok {
-		return "", nil, errors.New("model must be a nonempty string")
+		return "", nil, false, errors.New("model must be a nonempty string")
 	}
 	var localModel string
 	if err := json.Unmarshal(modelRaw, &localModel); err != nil || strings.TrimSpace(localModel) == "" {
-		return "", nil, errors.New("model must be a nonempty string")
+		return "", nil, false, errors.New("model must be a nonempty string")
 	}
 	model, ok := s.cfg.Models[localModel]
 	if !ok {
-		return localModel, nil, fmt.Errorf("unknown model %q; configured models: %s", localModel, configuredModels(s.cfg))
+		return localModel, nil, false, fmt.Errorf("unknown model %q; configured models: %s", localModel, configuredModels(s.cfg))
 	}
 
 	var stream bool
 	if raw, ok := fields["stream"]; ok {
 		if err := json.Unmarshal(raw, &stream); err != nil {
-			return localModel, nil, errors.New("stream must be a boolean")
-		}
-		if stream {
-			return localModel, nil, errors.New("stream=true is not supported yet")
+			return localModel, nil, false, errors.New("stream must be a boolean")
 		}
 	}
 	fields["model"] = json.RawMessage(strconv.Quote(model.BedrockModelID))
@@ -184,9 +186,9 @@ func (s *Server) transformChatRequest(r *http.Request) (string, []byte, error) {
 	}
 	transformed, err := json.Marshal(fields)
 	if err != nil {
-		return localModel, nil, errors.New("could not encode request body")
+		return localModel, nil, stream, errors.New("could not encode request body")
 	}
-	return localModel, transformed, nil
+	return localModel, transformed, stream, nil
 }
 
 func querySuffix(r *http.Request) string {
@@ -280,6 +282,239 @@ func relayAndObserve(dst io.Writer, src io.Reader, limit int64) ([]byte, error) 
 			return nil, readErr
 		}
 	}
+}
+
+// sseEvent is the bounded observer view of one SSE record. The original bytes
+// are always written directly to the caller before the observer sees them.
+// Oversized records are deliberately represented without their data so a
+// large upstream event cannot grow observer memory.
+type sseEvent struct {
+	Data      []byte
+	Oversized bool
+}
+
+// relayAndObserveStream is the shared byte relay for streaming protocols. It
+// preserves every upstream byte, flushes after each read, and gives a bounded
+// SSE observer one completed record at a time. Protocol handlers decide which
+// event means success or failure; the relay only handles delivery and parsing.
+func relayAndObserveStream(dst io.Writer, flush func(), src io.Reader, limit int64, observe func(sseEvent)) error {
+	parser := newSSEParser(limit, observe)
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			if _, err := dst.Write(buf[:n]); err != nil {
+				return err
+			}
+			parser.consume(buf[:n])
+			flush()
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				parser.finish()
+				return nil
+			}
+			return readErr
+		}
+	}
+}
+
+type sseParser struct {
+	limit         int
+	line          []byte
+	lineOversized bool
+	data          bytes.Buffer
+	dataOversized bool
+	observe       func(sseEvent)
+}
+
+func newSSEParser(limit int64, observe func(sseEvent)) *sseParser {
+	if limit < 1 {
+		limit = 1
+	}
+	return &sseParser{limit: int(limit), observe: observe}
+}
+
+func (p *sseParser) consume(chunk []byte) {
+	for _, b := range chunk {
+		if b == '\n' {
+			p.processLine()
+			p.line = p.line[:0]
+			p.lineOversized = false
+			continue
+		}
+		if p.lineOversized {
+			continue
+		}
+		if len(p.line) >= p.limit {
+			p.lineOversized = true
+			continue
+		}
+		p.line = append(p.line, b)
+	}
+}
+
+func (p *sseParser) finish() {
+	if len(p.line) > 0 || p.lineOversized {
+		p.processLine()
+	}
+	if p.data.Len() > 0 || p.dataOversized {
+		p.dispatch()
+	}
+}
+
+func (p *sseParser) processLine() {
+	if p.lineOversized {
+		p.dataOversized = true
+		return
+	}
+	line := p.line
+	if len(line) > 0 && line[len(line)-1] == '\r' {
+		line = line[:len(line)-1]
+	}
+	if len(line) == 0 {
+		p.dispatch()
+		return
+	}
+	if line[0] == ':' {
+		return
+	}
+	if !bytes.HasPrefix(line, []byte("data:")) {
+		return
+	}
+	value := line[len("data:"):]
+	if len(value) > 0 && value[0] == ' ' {
+		value = value[1:]
+	}
+	if p.dataOversized {
+		return
+	}
+	if p.data.Len()+len(value)+1 > p.limit {
+		p.data.Reset()
+		p.dataOversized = true
+		return
+	}
+	_, _ = p.data.Write(value)
+	_ = p.data.WriteByte('\n')
+}
+
+func (p *sseParser) dispatch() {
+	if p.data.Len() == 0 && !p.dataOversized {
+		return
+	}
+	event := sseEvent{Oversized: p.dataOversized}
+	if !p.dataOversized {
+		raw := p.data.Bytes()
+		if len(raw) > 0 && raw[len(raw)-1] == '\n' {
+			raw = raw[:len(raw)-1]
+		}
+		event.Data = append([]byte(nil), raw...)
+	}
+	p.data.Reset()
+	p.dataOversized = false
+	if p.observe != nil {
+		p.observe(event)
+	}
+}
+
+type chatStreamObserver struct {
+	inputTokens  *int64
+	outputTokens *int64
+	uncovered    bool
+	usageInvalid bool
+	sawDone      bool
+	sawError     bool
+}
+
+func (o *chatStreamObserver) observe(event sseEvent) {
+	if event.Oversized {
+		o.usageInvalid = true
+		return
+	}
+	data := bytes.TrimSpace(event.Data)
+	if bytes.Equal(data, []byte("[DONE]")) {
+		o.sawDone = true
+		return
+	}
+	if len(data) == 0 {
+		return
+	}
+	var envelope struct {
+		Error json.RawMessage `json:"error"`
+		Usage json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		o.usageInvalid = true
+		return
+	}
+	if len(envelope.Error) > 0 && string(envelope.Error) != "null" {
+		o.sawError = true
+	}
+	if len(envelope.Usage) == 0 || string(envelope.Usage) == "null" {
+		return
+	}
+	var usage map[string]json.RawMessage
+	if err := json.Unmarshal(envelope.Usage, &usage); err != nil {
+		o.usageInvalid = true
+		return
+	}
+	if raw, ok := usage["prompt_tokens"]; ok {
+		var value int64
+		if err := json.Unmarshal(raw, &value); err != nil {
+			o.usageInvalid = true
+		} else {
+			o.inputTokens = &value
+		}
+	}
+	if raw, ok := usage["completion_tokens"]; ok {
+		var value int64
+		if err := json.Unmarshal(raw, &value); err != nil {
+			o.usageInvalid = true
+		} else {
+			o.outputTokens = &value
+		}
+	}
+	for key := range usage {
+		if key != "prompt_tokens" && key != "completion_tokens" && key != "total_tokens" {
+			o.uncovered = true
+		}
+	}
+}
+
+func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, started time.Time, localModel string, response *http.Response) {
+	body := response.Body
+	if body == nil {
+		body = io.NopCloser(strings.NewReader(""))
+	}
+	flusher, _ := w.(http.Flusher)
+	flush := func() {
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	observer := &chatStreamObserver{}
+	copyErr := relayAndObserveStream(w, flush, body, maxUsageObservationBytes, observer.observe)
+	status := response.StatusCode
+	result := CompletionResult{
+		Endpoint:      "/v1/chat/completions",
+		LocalModel:    localModel,
+		UpstreamModel: configuredTarget(s.cfg, localModel),
+		HTTPStatus:    &status,
+		Outcome:       CompletionFailed,
+	}
+	if !observer.usageInvalid {
+		result.InputTokens = observer.inputTokens
+		result.OutputTokens = observer.outputTokens
+		result.ObservedUncoveredBillingFields = observer.uncovered
+	}
+	normalEnd := copyErr == nil || errors.Is(copyErr, io.EOF)
+	if response.StatusCode >= 200 && response.StatusCode < 300 && normalEnd && observer.sawDone && !observer.sawError {
+		result.Outcome = CompletionSucceeded
+	}
+	if errors.Is(r.Context().Err(), context.Canceled) || errors.Is(copyErr, context.Canceled) {
+		result.Outcome = CompletionCanceled
+	}
+	s.finishCompletion(started, result)
 }
 
 func parseChatUsage(body []byte) (*int64, *int64, bool) {

@@ -143,7 +143,7 @@ func TestChatCompletionValidationAndTransportErrors(t *testing.T) {
 		{name: "malformed", body: `{`, wantStatus: http.StatusBadRequest, wantText: "JSON object"},
 		{name: "missing model", body: `{"messages":[]}`, wantStatus: http.StatusBadRequest, wantText: "model must be"},
 		{name: "unknown model", body: `{"model":"missing","messages":[]}`, wantStatus: http.StatusBadRequest, wantText: "configured models: coding, fast"},
-		{name: "streaming not ready", body: `{"model":"coding","messages":[],"stream":true}`, wantStatus: http.StatusBadRequest, wantText: "stream=true"},
+		{name: "stream must be boolean", body: `{"model":"coding","messages":[],"stream":"true"}`, wantStatus: http.StatusBadRequest, wantText: "stream must be a boolean"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeRequestDoer{}
