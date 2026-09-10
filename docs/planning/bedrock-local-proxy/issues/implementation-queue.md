@@ -14,8 +14,6 @@ V1 completion requires every issue Done, both live client gates passed, and the 
 
 ## Ready
 
-- [16: Repair accounting metadata and shutdown ordering](16-repair-accounting-evidence.md)
-
 ## In progress
 
 None.
@@ -27,6 +25,7 @@ None.
 
 ## Implemented
 
+- [16: Repair accounting metadata and shutdown ordering](16-repair-accounting-evidence.md)
 - [08: Report request usage and a truthful session summary](08-request-accounting.md)
 
 ## Done
