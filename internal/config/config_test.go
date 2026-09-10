@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,7 +55,21 @@ func TestValidateRejectsNonLoopbackAndInvalidValues(t *testing.T) {
 			model := c.Models["coding"]
 			model.InputPerMillion = &v
 			c.Models["coding"] = model
-		}, "must not be negative"},
+		}, "finite nonnegative"},
+		{"non-finite price", func(c *Config) {
+			v := math.NaN()
+			model := c.Models["coding"]
+			model.InputPerMillion = &v
+			c.Models["coding"] = model
+		}, "finite nonnegative"},
+		{"non-finite temperature", func(c *Config) {
+			v := math.Inf(1)
+			model := c.Models["coding"]
+			model.Temperature = &v
+			c.Models["coding"] = model
+		}, "temperature must be finite"},
+		{"profile whitespace", func(c *Config) { c.AWS.Profile = " profile" }, "surrounding whitespace"},
+		{"region whitespace", func(c *Config) { c.AWS.Region = "us-east-2 " }, "surrounding whitespace"},
 		{"missing target", func(c *Config) { c.Models["coding"] = ModelConfig{} }, "bedrock_model_id is required"},
 	}
 	for _, tt := range tests {
