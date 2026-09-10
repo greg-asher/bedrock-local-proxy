@@ -18,7 +18,7 @@ On graceful shutdown, finalize request accounting after drain/cancellation and p
 
 Authority: [Product Brief](../bedrock-local-proxy-product-brief.docx), plus the user’s clarifications: use actual profile `Halo-Win-Agent-Execution` and region `us-east-2`; the user supplies model IDs in YAML; Pi is the primary acceptance client; add Anthropic Messages for Claude Code. Keep profile, region, targets, and prices configurable. No exact model ID is required for implementation tests. Never log prompts, responses, tool content, credentials, or raw sensitive headers. The product remains a localhost-only Go executable with no hosted infrastructure.
 
-Brief sections 12–15. Protocol issues own extraction; this issue owns aggregation and presentation. Prices are estimates supplied by the user, never fetched automatically. Unknown totals cannot be presented as zero or a complete session bill. Logs go only to stdout/stderr; no files, rotation, persistence, or remote telemetry.
+Brief sections 12–15. Protocol issues own extraction; this issue owns aggregation and presentation. Prices are estimates supplied by the user, never fetched automatically. Unknown totals cannot be presented as zero or a complete session bill. Logs go only to stdout/stderr; no files, rotation, persistence, or remote telemetry. Accounting tests must consume the real protocol result shapes emitted by issues 03–07 while keeping provider and client execution local and deterministic.
 
 ## Done when
 

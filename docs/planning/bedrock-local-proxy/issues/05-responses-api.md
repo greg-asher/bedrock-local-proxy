@@ -16,7 +16,7 @@ Record contract fixtures and supported behavior in tests. Live support for the u
 
 Authority: [Product Brief](../bedrock-local-proxy-product-brief.docx), plus the user’s clarifications: use actual profile `Halo-Win-Agent-Execution` and region `us-east-2`; the user supplies model IDs in YAML; Pi is the primary acceptance client; add Anthropic Messages for Claude Code. Keep profile, region, targets, and prices configurable. No exact model ID is required for implementation tests. Never log prompts, responses, tool content, credentials, or raw sensitive headers. The product remains a localhost-only Go executable with no hosted infrastructure.
 
-Brief section 7 requires Responses where supported upstream. Issues 03–04 establish local error behavior, preservation rules, and the shared completion lifecycle. This issue owns Responses field/default mapping and usage extraction; no response storage, retrieval, conversation database, or additional endpoint is included.
+Brief section 7 requires Responses where supported upstream. Issues 03–04 establish local error behavior, preservation rules, and the shared completion lifecycle. This issue owns Responses field/default mapping and usage extraction; no response storage, retrieval, conversation database, or additional endpoint is included. Synthetic fixtures must use the real Responses request, response item, tool, error, usage, and streaming event shapes for the supported upstream contract.
 
 ## Done when
 

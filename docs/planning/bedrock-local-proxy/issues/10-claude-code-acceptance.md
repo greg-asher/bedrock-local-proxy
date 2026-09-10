@@ -18,7 +18,7 @@ Observe optional startup/token-counting calls. Record their nonfatal behavior wh
 
 Authority: [Product Brief](../bedrock-local-proxy-product-brief.docx), plus the user’s clarifications: use actual profile `Halo-Win-Agent-Execution` and region `us-east-2`; the user supplies model IDs in YAML; Pi is the primary acceptance client; add Anthropic Messages for Claude Code. Keep profile, region, targets, and prices configurable. No exact model ID is required for implementation tests. Never log prompts, responses, tool content, credentials, or raw sensitive headers. The product remains a localhost-only Go executable with no hosted infrastructure.
 
-User requested Claude CLI support; the plan interprets this as Claude Code, with a focused compatibility gate distinct from Pi. [Claude Code protocol reference](https://code.claude.com/docs/en/llm-gateway-protocol) guides the checks. No OpenCode requirement, full-feature parity, automatic fallback, or hosted gateway work is included.
+User requested Claude CLI support; the plan interprets this as Claude Code, with a focused compatibility gate distinct from Pi. [Claude Code protocol reference](https://code.claude.com/docs/en/llm-gateway-protocol) guides the checks. No OpenCode requirement, full-feature parity, automatic fallback, or hosted gateway work is included. Local Claude Code fixtures and configuration checks must use Claude Code’s actual Anthropic base URL, headers, request bodies, and SSE shapes; do not substitute a bespoke test client.
 
 Complete all local implementation and synthetic contract checks without AWS credentials. This issue remains externally blocked only for the live Claude Code run until the accepted source is available on the AWS-enabled test machine.
 

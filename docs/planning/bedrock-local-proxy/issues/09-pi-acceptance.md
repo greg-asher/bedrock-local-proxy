@@ -18,7 +18,7 @@ Exercise each OpenAI endpoint against a configured target where supported. If Re
 
 Authority: [Product Brief](../bedrock-local-proxy-product-brief.docx), plus the user’s clarifications: use actual profile `Halo-Win-Agent-Execution` and region `us-east-2`; the user supplies model IDs in YAML; Pi is the primary acceptance client; add Anthropic Messages for Claude Code. Keep profile, region, targets, and prices configurable. No exact model ID is required for implementation tests. Never log prompts, responses, tool content, credentials, or raw sensitive headers. The product remains a localhost-only Go executable with no hosted infrastructure.
 
-Brief section 22; user selects Pi, not OpenCode, for full acceptance. This is the live integration gate. Missing AWS session, client installation, or usable model configuration blocks this issue, not earlier implementation. Credential refresh/expiry fault behavior is established by controlled tests; report that separately from live SSO success.
+Brief section 22; user selects Pi, not OpenCode, for full acceptance. This is the live integration gate. Missing AWS session, client installation, or usable model configuration blocks this issue, not earlier implementation. Credential refresh/expiry fault behavior is established by controlled tests; report that separately from live SSO success. Local Pi fixtures and configuration checks must use Pi’s actual provider/model configuration and OpenAI-compatible request/stream shapes; do not substitute a bespoke test client.
 
 Complete all local implementation and synthetic contract checks without AWS credentials. This issue remains externally blocked only for the live Pi run until the accepted source is available on the AWS-enabled test machine.
 

@@ -16,7 +16,7 @@ Return upstream bodies/statuses unchanged. Local failures use Anthropic-shaped e
 
 Authority: [Product Brief](../bedrock-local-proxy-product-brief.docx), plus the user’s clarifications: use actual profile `Halo-Win-Agent-Execution` and region `us-east-2`; the user supplies model IDs in YAML; Pi is the primary acceptance client; add Anthropic Messages for Claude Code. Keep profile, region, targets, and prices configurable. No exact model ID is required for implementation tests. Never log prompts, responses, tool content, credentials, or raw sensitive headers. The product remains a localhost-only Go executable with no hosted infrastructure.
 
-User addition to the brief: Anthropic Messages for Claude Code. This is a separate protocol, not a requirement to translate OpenAI into Anthropic. Depends only on local configuration and AWS transport. References: [AWS Messages](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-messages-api.html), [Claude Code protocol](https://code.claude.com/docs/en/llm-gateway-protocol). Token counting and Anthropic model discovery are not added here.
+User addition to the brief: Anthropic Messages for Claude Code. This is a separate protocol, not a requirement to translate OpenAI into Anthropic. Depends only on local configuration and AWS transport. References: [AWS Messages](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-messages-api.html), [Claude Code protocol](https://code.claude.com/docs/en/llm-gateway-protocol). Token counting and Anthropic model discovery are not added here. Synthetic fixtures must use the real Anthropic Messages request/response envelopes, headers, error shapes, and usage fields expected by Claude Code and the Bedrock native route.
 
 ## Done when
 

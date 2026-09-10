@@ -18,7 +18,7 @@ Establish the internal completion result consumed by accounting: endpoint, optio
 
 Authority: [Product Brief](../bedrock-local-proxy-product-brief.docx), plus the user’s clarifications: use actual profile `Halo-Win-Agent-Execution` and region `us-east-2`; the user supplies model IDs in YAML; Pi is the primary acceptance client; add Anthropic Messages for Claude Code. Keep profile, region, targets, and prices configurable. No exact model ID is required for implementation tests. Never log prompts, responses, tool content, credentials, or raw sensitive headers. The product remains a localhost-only Go executable with no hosted infrastructure.
 
-Brief sections 6–11, 14, 22. Depends on the configuration server and signed transport. Use semantic JSON preservation rather than promising byte-identical request bodies after model rewriting. This issue owns normal Chat Completions usage extraction. No Pi installation or live AWS access is needed for automated completion.
+Brief sections 6–11, 14, 22. Depends on the configuration server and signed transport. Use semantic JSON preservation rather than promising byte-identical request bodies after model rewriting. This issue owns normal Chat Completions usage extraction. No Pi installation or live AWS access is needed for automated completion. Synthetic upstream fixtures must use the real OpenAI Chat Completions request, response, error, and usage envelopes expected by supported clients and Bedrock’s OpenAI-compatible route.
 
 ## Done when
 
