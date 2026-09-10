@@ -101,6 +101,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			s.cancelActiveRequests()
 			// Cancellation is the final drain step. Wait for every handler to
 			// publish its completion before the caller emits session totals.
+			grace := time.NewTimer(250 * time.Millisecond)
+			defer grace.Stop()
 			for {
 				s.lifecycleMu.Lock()
 				if len(s.active) == 0 {
@@ -109,7 +111,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 				}
 				changed = s.activeChanged
 				s.lifecycleMu.Unlock()
-				<-changed
+				select {
+				case <-changed:
+				case <-grace.C:
+					return shutdownErr
+				}
 			}
 		}
 	}
@@ -177,7 +183,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusOK
 	outcome := CompletionSucceeded
 	if err := json.NewEncoder(w).Encode(modelList{Object: "list", Data: data}); err != nil {
-		status = http.StatusInternalServerError
 		outcome = CompletionFailed
 	}
 	s.finishCompletion(started, CompletionResult{Endpoint: "/v1/models", HTTPStatus: &status, Outcome: outcome})
