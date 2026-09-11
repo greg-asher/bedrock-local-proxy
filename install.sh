@@ -30,25 +30,76 @@ bin_dir=${HOME:?HOME must be set}/.local/bin
 config_dir=${HOME:?HOME must be set}/.config/bedrock-proxy
 config_path=$config_dir/config.yaml
 install_path=$bin_dir/bedrock-proxy
+case "${XDG_CACHE_HOME-}" in
+	/*) installer_cache_root=$XDG_CACHE_HOME/bedrock-proxy/go ;;
+	*) installer_cache_root=$HOME/.cache/bedrock-proxy/go ;;
+esac
 case "${XDG_STATE_HOME-}" in
 	/*) report_dir=$XDG_STATE_HOME/bedrock-proxy/sessions ;;
 	*) report_dir=$HOME/.local/state/bedrock-proxy/sessions ;;
 esac
+
+tmp_binary=
+temporary_cache_root=
+remove_temporary_cache() {
+	if [ -z "$temporary_cache_root" ]; then
+		return
+	fi
+	# Go deliberately marks downloaded module directories read-only. Restore
+	# owner write permission before removing an installer-owned temporary cache.
+	chmod -R u+w "$temporary_cache_root" 2>/dev/null || true
+	rm -rf -- "$temporary_cache_root" 2>/dev/null || true
+}
+cleanup() {
+	if [ -n "$tmp_binary" ]; then
+		rm -f -- "$tmp_binary"
+	fi
+	remove_temporary_cache
+}
+trap cleanup EXIT HUP INT TERM
+
+prepare_go_cache() {
+	cache_root=$1
+	if ! mkdir -p "$cache_root/build" "$cache_root/mod" 2>/dev/null; then
+		return 1
+	fi
+	for cache_dir in "$cache_root/build" "$cache_root/mod"; do
+		cache_probe=$cache_dir/.bedrock-proxy-write-test.$$
+		if ! (umask 077 && : >"$cache_probe") 2>/dev/null; then
+			rm -f -- "$cache_probe" 2>/dev/null || true
+			return 1
+		fi
+		rm -f -- "$cache_probe"
+	done
+}
+
+if ! prepare_go_cache "$installer_cache_root"; then
+	temporary_cache_root=$(mktemp -d "${TMPDIR:-/tmp}/bedrock-proxy-go-cache.XXXXXX")
+	installer_cache_root=$temporary_cache_root
+	if ! prepare_go_cache "$installer_cache_root"; then
+		printf '%s\n' "install.sh: cannot create a writable Go build cache" >&2
+		exit 1
+	fi
+	printf '%s\n' "Using a temporary Go cache because the per-user cache is not writable."
+fi
+go_build_cache=$installer_cache_root/build
+go_module_cache=$installer_cache_root/mod
 
 mkdir -p "$bin_dir"
 
 # Build in the destination directory so the final rename is atomic and a
 # failed build cannot replace a working installation.
 tmp_binary=$(mktemp "$bin_dir/.bedrock-proxy.XXXXXX")
-cleanup() {
-	rm -f -- "$tmp_binary"
-}
-trap cleanup EXIT HUP INT TERM
 
-printf '%s\n' "Building bedrock-proxy for $(go env GOOS)/$(go env GOARCH)..."
-if ! (cd "$script_dir" && go build -o "$tmp_binary" ./cmd/bedrock-proxy); then
+printf '%s\n' "Building bedrock-proxy for $(GOCACHE="$go_build_cache" GOMODCACHE="$go_module_cache" go env GOOS)/$(GOCACHE="$go_build_cache" GOMODCACHE="$go_module_cache" go env GOARCH)..."
+if ! (cd "$script_dir" && GOCACHE="$go_build_cache" GOMODCACHE="$go_module_cache" go build -o "$tmp_binary" ./cmd/bedrock-proxy); then
 	printf '%s\n' "install.sh: build failed; existing installation was left unchanged" >&2
 	exit 1
+fi
+
+if [ -n "$temporary_cache_root" ]; then
+	remove_temporary_cache
+	temporary_cache_root=
 fi
 
 if ! version_output=$("$tmp_binary" --version 2>&1); then
@@ -59,6 +110,7 @@ fi
 
 chmod 755 "$tmp_binary"
 mv -f -- "$tmp_binary" "$install_path"
+tmp_binary=
 trap - EXIT HUP INT TERM
 
 # Run the installed path as the final installation check.

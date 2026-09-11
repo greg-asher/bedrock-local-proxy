@@ -45,7 +45,7 @@ The script builds for the current host, installs the binary at `~/.local/bin/bed
 ~/.config/bedrock-proxy/config.yaml
 ```
 
-It creates the configuration only when it is missing. Re-running the script updates the binary and preserves the existing configuration byte-for-byte. If `~/.local/bin` is not already on `PATH`, add it for the current shell:
+It creates the configuration only when it is missing. Re-running the script updates the binary and preserves the existing configuration byte-for-byte. The build uses a private cache under `${XDG_CACHE_HOME:-$HOME/.cache}/bedrock-proxy/go`; if that location is not writable, the installer automatically uses a temporary cache. It never needs `sudo` or access to a root-owned Go cache. If `~/.local/bin` is not already on `PATH`, add it for the current shell:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
@@ -356,6 +356,7 @@ The proxy forwards Anthropic headers and the Messages request shape to Bedrockâ€
 
 ## Troubleshooting
 
+- **`install.sh` reports `build failed` with `permission denied`:** update the checkout and rerun `./install.sh`. The current installer avoids inaccessible default Go caches and falls back to a private temporary cache. A permission error before the build starts indicates that `~/.local/bin` itself is not writable.
 - **Configuration file not found:** run `./install.sh` or pass the correct path with `--config`.
 - **AWS credentials are unavailable:** run `aws sso login --profile <the profile in config.yaml>` and retry.
 - **Credentials have expired:** run the same `aws sso login` command again; no access keys need to be exported.
