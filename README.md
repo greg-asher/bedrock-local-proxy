@@ -69,7 +69,7 @@ listen: 127.0.0.1:8787
 
 models:
   coding:
-    display_name: Claude Sonnet for coding
+    display_name: Responses-compatible coding model
     bedrock_model_id: REPLACE_WITH_YOUR_BEDROCK_MODEL_ID
     input_per_million: 0
     output_per_million: 0
@@ -79,6 +79,7 @@ models:
     # Required for Codex. These are examples; use documented values for the
     # exact configured target or an exact bundled metadata_profile.
     capabilities:
+      responses_api: true
       context_window: 200000
       max_output_tokens: 64000
       input_modalities: [text, image]
@@ -108,6 +109,7 @@ Configuration fields:
 | `models.<alias>.temperature` | no | Default temperature inserted only when the request omits it. |
 | `models.<alias>.max_tokens` | no | Default output-token limit inserted only when the request omits it. |
 | `models.<alias>.capabilities.metadata_profile` | Codex only | Exact bundled metadata profile. Profiles are matched only by name or exact Bedrock target ID. |
+| `models.<alias>.capabilities.responses_api` | Codex only | Whether the exact target supports Responses on `bedrock-runtime`. Required for unrecognized targets; set it only from authoritative AWS compatibility documentation. |
 | `models.<alias>.capabilities.context_window` | Codex only | Documented hard total-context limit. Explicit values override a selected profile. |
 | `models.<alias>.capabilities.max_output_tokens` | Codex only | Documented hard output limit. `max_tokens` must not exceed it. |
 | `models.<alias>.capabilities.input_modalities` | Codex only | Supported input types: `text` and optionally `image`. |
@@ -116,7 +118,7 @@ Configuration fields:
 
 Prices are never fetched automatically. If the upstream response does not contain both token counts, or either price is omitted, the log reports the estimate as unavailable rather than treating it as zero. Keep model aliases free of surrounding whitespace and use finite, nonnegative prices.
 
-Capability numbers in the example are placeholders, not proxy defaults. `configure codex` requires complete resolved metadata and fails with the missing fields rather than guessing. Explicit values take precedence over an exact selected profile; values above a bundled documented limit are reported for review. Existing version `1` configurations without `capabilities` continue to serve other clients.
+Capability numbers in the example are placeholders, not proxy defaults. `configure codex` requires complete resolved metadata and confirmed Responses support, then fails with the missing fields rather than guessing. Exact bundled profiles currently cover [`openai.gpt-oss-120b-1:0`](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-oss-120b.html), [`openai.gpt-oss-20b-1:0`](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-oss-20b.html), and their documented GovCloud inference IDs. Their AWS model cards document a 128,000-token context window, a 16,000-token output ceiling, text input, and Responses support; AWS also documents [client-side function calling through Responses](https://docs.aws.amazon.com/bedrock/latest/userguide/tool-use-client-side.html). The [Sonnet 4.5 model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-4-5.html) is retained only to produce a precise incompatibility error because AWS documents that target as unsupported by Responses. Explicit values take precedence over a compatible profile for model limits, but cannot turn on an API that AWS documents as unsupported. Existing version `1` configurations without `capabilities` continue to serve other clients.
 
 Codex CLI `0.142.5` exposes context, modality, reasoning, parallel-tool, and search capabilities through its model catalog, but it does not expose a model output-ceiling field. The generated catalog retains `max_output_tokens` in proxy-owned metadata, and the proxy enforces that hard ceiling on every Responses request. When Codex omits a request limit, `models.<alias>.max_tokens` supplies the request default. `configure codex` and `doctor` report this client limitation explicitly so an output ceiling is never mistaken for metadata Codex consumed.
 
@@ -188,7 +190,7 @@ With one configured alias, `--model` is optional. With several aliases it is req
 
 Choose a local alias that does not match a Codex bundled model slug. Catalog generation rejects collisions so it cannot replace built-in Codex metadata.
 
-The command prints the complete `bedrock-local` provider/profile TOML and the profile file path. Add that TOML at the printed path. It uses `http://127.0.0.1:8787/v1`, the Responses wire API, a non-secret local bearer value, the generated catalog, and the selected alias. It also sets `web_search = "disabled"` and `tools.web_search = false` so Codex does not offer OpenAI-hosted search while MCP tools remain available. It does not modify Codex configuration. Regenerate after changing the selected target, display name, or any capability; `doctor` compares the active configuration fingerprint with the catalog and rejects stale metadata.
+The command prints the complete `bedrock-local` provider/profile TOML and the profile file path. Add that TOML at the printed path. It uses `http://127.0.0.1:8787/v1`, the Responses wire API, a non-secret local bearer value, the generated catalog, and the selected alias. It sets `web_search = "disabled"` and `tools.web_search = false` so Codex does not offer OpenAI-hosted search while MCP tools remain available. It also disables ChatGPT apps in this local-provider profile because their internal `codex_apps` MCP may require a desktop connection that is unavailable on the proxy host. Explicitly configured MCP servers, including search MCPs, remain enabled. It does not modify Codex configuration. Regenerate after changing the selected target, display name, or any capability; `doctor` compares the active configuration fingerprint with the catalog and rejects stale metadata.
 
 Run the offline compatibility checks before AWS login:
 
@@ -203,7 +205,7 @@ bedrock-proxy doctor --client codex --model coding --live
 codex --profile bedrock-local
 ```
 
-OpenAI `web_search` is a server-hosted Responses tool. The [Bedrock Runtime Responses endpoint](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html) supports client-side tools but does not execute that hosted tool, so the generated catalog advertises hosted search as unavailable. Configure the desired search provider as an MCP in Codex instead. Codex discovers and executes the MCP, while the proxy transports resulting function calls and outputs without inspecting their content. Disabling hosted search does not disable MCP tools. Claude 4 models can return several independent tool calls in one turn, so the bundled Sonnet 4.5 profile advertises parallel calls as supported; the [Claude parallel tool-use guide](https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use) describes that behavior. If a client still sends a hosted tool, the proxy returns `400 unsupported_hosted_tool` before making an AWS request. The generated keys follow the [Codex configuration reference](https://developers.openai.com/codex/config-reference).
+OpenAI `web_search` is a server-hosted Responses tool. The [Bedrock Runtime Responses endpoint](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html) supports client-side tools but does not execute that hosted tool, so the generated catalog advertises hosted search as unavailable. Configure the desired search provider as an MCP in Codex instead. Codex discovers and executes the MCP, while the proxy transports resulting function calls and outputs without inspecting their content. Disabling hosted search or ChatGPT apps does not disable configured MCP tools. If a client still sends a hosted tool, the proxy returns `400 unsupported_hosted_tool` before making an AWS request. The generated keys follow the [Codex configuration reference](https://developers.openai.com/codex/config-reference).
 
 The complete clean-install sequence is:
 
@@ -287,6 +289,8 @@ The proxy forwards Anthropic headers and the Messages request shape to Bedrockâ€
 - **Port already in use:** change `listen` to another loopback port and update the client base URL.
 - **Model access denied or unsupported:** confirm that the selected role, region, and Bedrock model/inference profile are compatible.
 - **Codex reports fallback or missing model metadata:** rerun `bedrock-proxy configure codex --model <alias>`, replace the profile TOML, then run the offline doctor. Regenerate after a Codex upgrade when doctor reports catalog drift.
+- **Codex reports `codex_apps` was not initialized:** regenerate and replace the Bedrock profile. The generated profile disables ChatGPT apps for this local provider while leaving configured MCP servers available.
+- **Codex target does not support Responses:** select a target whose exact AWS model card lists Responses support on `bedrock-runtime`. `configure codex`, `doctor`, and known-incompatible live requests fail locally before AWS transport.
 - **Codex asks for hosted web search:** configure search as an MCP in Codex. The proxy deliberately rejects hosted Responses tools because Bedrock Runtime does not execute them.
 
 ## Cross-build checks

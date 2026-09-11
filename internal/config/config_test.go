@@ -159,12 +159,34 @@ func TestResolveModelCapabilitiesUsesExactProfileAndOverrides(t *testing.T) {
 	if resolved.ContextWindow != 200000 || resolved.MaxOutputTokens != 64000 || !resolved.FunctionCalling || !resolved.ParallelCalls {
 		t.Fatalf("resolved capabilities = %+v", resolved)
 	}
+	if resolved.ResponsesSupported || !resolved.ResponsesKnown {
+		t.Fatalf("Sonnet Responses compatibility = %+v", resolved)
+	}
+	if err := ValidateCodexCompatibility(model, resolved); err == nil || !strings.Contains(err.Error(), "does not support the Responses API") {
+		t.Fatalf("Codex compatibility error = %v", err)
+	}
+}
+
+func TestResolveModelCapabilitiesUsesResponsesCompatibleGPTOSSProfile(t *testing.T) {
+	model := ModelConfig{BedrockModelID: "openai.gpt-oss-120b-1:0", Capabilities: &CapabilityConfig{}}
+	resolved, warnings, err := ResolveModelCapabilities(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || !resolved.ResponsesKnown || !resolved.ResponsesSupported || resolved.ContextWindow != 128000 || resolved.MaxOutputTokens != 16000 || !resolved.FunctionCalling || resolved.ParallelCalls {
+		t.Fatalf("resolved capabilities = %+v warnings=%v", resolved, warnings)
+	}
+	if err := ValidateCodexCompatibility(model, resolved); err != nil {
+		t.Fatalf("Codex compatibility = %v", err)
+	}
 }
 
 func TestResolveModelCapabilitiesValidatesCompleteExplicitMetadata(t *testing.T) {
+	responses := true
 	model := ModelConfig{
 		BedrockModelID: "custom-target",
 		Capabilities: &CapabilityConfig{
+			ResponsesAPI:    &responses,
 			ContextWindow:   int64Pointer(100000),
 			MaxOutputTokens: int64Pointer(32000),
 			InputModalities: []string{"text"},
@@ -184,6 +206,33 @@ func TestResolveModelCapabilitiesValidatesCompleteExplicitMetadata(t *testing.T)
 	}
 	if len(warnings) != 0 || !resolved.ReasoningSupported || len(resolved.ReasoningEfforts) != 3 {
 		t.Fatalf("resolved capabilities = %+v warnings=%v", resolved, warnings)
+	}
+}
+
+func TestValidateCodexCompatibilityRequiresExplicitResponsesSupportForUnknownTarget(t *testing.T) {
+	model := ModelConfig{BedrockModelID: "custom-target", Capabilities: &CapabilityConfig{}}
+	for _, test := range []struct {
+		name      string
+		responses *bool
+		want      string
+	}{
+		{name: "omitted", want: "responses_api is required"},
+		{name: "disabled", responses: boolPointer(false), want: "does not support the Responses API"},
+		{name: "enabled", responses: boolPointer(true)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resolved := ResolvedCapabilities{ResponsesKnown: test.responses != nil, FunctionCalling: true}
+			if test.responses != nil {
+				resolved.ResponsesSupported = *test.responses
+			}
+			err := ValidateCodexCompatibility(model, resolved)
+			if test.want == "" && err != nil {
+				t.Fatal(err)
+			}
+			if test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

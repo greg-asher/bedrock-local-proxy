@@ -50,7 +50,7 @@ func TestGeneratePreservesBundledModelsAndAddsResolvedAlias(t *testing.T) {
 	if result.ModelAlias != "coding" || result.CodexVersion != "0.142.5" || result.CatalogPath != output {
 		t.Fatalf("result = %+v", result)
 	}
-	for _, expected := range []string{"model = \"coding\"", "web_search = \"disabled\"", "tools.web_search = false", "supports_standalone_web_search = false", "Authorization = \"Bearer local\"", "X-Bedrock-Proxy-Catalog", output} {
+	for _, expected := range []string{"model = \"coding\"", "web_search = \"disabled\"", "tools.web_search = false", "features.apps = false", "supports_standalone_web_search = false", "Authorization = \"Bearer local\"", "X-Bedrock-Proxy-Catalog", output} {
 		if !strings.Contains(result.TOML, expected) {
 			t.Fatalf("TOML missing %q:\n%s", expected, result.TOML)
 		}
@@ -111,13 +111,16 @@ func TestGenerateRequiresModelForMultipleAliases(t *testing.T) {
 }
 
 func TestGenerateRejectsMissingCapabilitiesAndFunctionCalling(t *testing.T) {
+	missingResponses := completeModel(true)
+	missingResponses.Capabilities.ResponsesAPI = nil
 	for _, tt := range []struct {
 		name  string
 		model config.ModelConfig
 		want  string
 	}{
 		{name: "missing", model: config.ModelConfig{BedrockModelID: "custom"}, want: "capabilities are required"},
-		{name: "no functions", model: completeModel(false), want: "must support function calling"},
+		{name: "unknown Responses support", model: missingResponses, want: "responses_api is required"},
+		{name: "no functions", model: completeModel(false), want: "must support client-side function calling"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := catalogTestConfig()
@@ -132,10 +135,10 @@ func TestGenerateRejectsMissingCapabilitiesAndFunctionCalling(t *testing.T) {
 
 func TestGenerateReportsDocumentedLimitOverridesWithoutReplacingThem(t *testing.T) {
 	cfg := catalogTestConfig()
-	contextWindow, maxOutput := int64(200001), int64(64001)
+	contextWindow, maxOutput := int64(128001), int64(16001)
 	functions, reasoning := true, false
 	cfg.Models["coding"] = config.ModelConfig{
-		BedrockModelID: "anthropic.claude-sonnet-4-5-20250929-v1:0",
+		BedrockModelID: "openai.gpt-oss-120b-1:0",
 		Capabilities: &config.CapabilityConfig{
 			ContextWindow: &contextWindow, MaxOutputTokens: &maxOutput, InputModalities: []string{"text", "image"},
 			Reasoning: config.ReasoningCapability{Supported: &reasoning},
@@ -148,6 +151,18 @@ func TestGenerateReportsDocumentedLimitOverridesWithoutReplacingThem(t *testing.
 	}
 	if len(result.Warnings) != 3 || !strings.Contains(strings.Join(result.Warnings, " "), "exceeds profile value") || !strings.Contains(strings.Join(result.Warnings, " "), "does not expose max_output_tokens") {
 		t.Fatalf("warnings = %v", result.Warnings)
+	}
+}
+
+func TestGenerateRejectsExactTargetWithoutResponsesSupport(t *testing.T) {
+	cfg := catalogTestConfig()
+	cfg.Models["coding"] = config.ModelConfig{
+		BedrockModelID: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+		Capabilities:   &config.CapabilityConfig{},
+	}
+	_, err := Generate(context.Background(), GenerateOptions{Config: cfg, Runner: fakeRunner{}})
+	if err == nil || !strings.Contains(err.Error(), "does not support the Responses API") {
+		t.Fatalf("compatibility error = %v", err)
 	}
 }
 
@@ -279,10 +294,12 @@ func catalogTestConfig() config.Config {
 }
 
 func completeModel(functionCalling bool) config.ModelConfig {
+	responses := true
 	return config.ModelConfig{
 		DisplayName:    "Coding target",
 		BedrockModelID: "custom-target",
 		Capabilities: &config.CapabilityConfig{
+			ResponsesAPI:    &responses,
 			ContextWindow:   int64p(100000),
 			MaxOutputTokens: int64p(32000),
 			InputModalities: []string{"text", "image"},

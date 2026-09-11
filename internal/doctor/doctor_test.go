@@ -140,6 +140,38 @@ func TestOfflineCodexDoctorRejectsMissingHostedSearchControls(t *testing.T) {
 	}
 }
 
+func TestOfflineCodexDoctorRejectsEnabledChatGPTApps(t *testing.T) {
+	root := t.TempDir()
+	cfg := doctorTestConfig(root)
+	runner := doctorRunner{version: "0.142.5", bundled: doctorBundledCatalog()}
+	generated, err := codex.Generate(context.Background(), codex.GenerateOptions{Config: cfg, ConfigPath: filepath.Join(root, "config.yaml"), Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := strings.Replace(generated.TOML, `features.apps = false`, `features.apps = true`, 1)
+	profilePath := filepath.Join(root, "profile.toml")
+	if err := os.WriteFile(profilePath, []byte(profile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := Run(context.Background(), Options{Config: cfg, ConfigPath: filepath.Join(root, "config.yaml"), Client: "codex", ProfilePath: profilePath, CodexRunner: runner})
+	if result.OK() || !hasFailedCategory(result, "codex_compatibility", "codex_apps") {
+		t.Fatalf("apps profile result = %+v", result.Checks)
+	}
+}
+
+func TestOfflineCodexDoctorRejectsTargetWithoutResponsesAPI(t *testing.T) {
+	root := t.TempDir()
+	cfg := doctorTestConfig(root)
+	model := cfg.Models["coding"]
+	responses := false
+	model.Capabilities.ResponsesAPI = &responses
+	cfg.Models["coding"] = model
+	result := Run(context.Background(), Options{Config: cfg, ConfigPath: filepath.Join(root, "config.yaml"), Client: "codex", ModelAlias: "coding"})
+	if result.OK() || !hasFailedCategory(result, "model_capability", "does not support the Responses API") {
+		t.Fatalf("Responses compatibility result = %+v", result.Checks)
+	}
+}
+
 func TestDiagnosticOutputLimitNeverExceedsCapability(t *testing.T) {
 	for _, test := range []struct {
 		ceiling int64
@@ -170,7 +202,7 @@ func TestDoctorNeedsCompleteMetadataOnlyForCodex(t *testing.T) {
 
 func doctorTestConfig(root string) config.Config {
 	contextWindow, maxOutput := int64(200000), int64(64000)
-	reasoning, functions, parallel := true, true, true
+	responses, reasoning, functions, parallel := true, true, true, true
 	return config.Config{
 		Version:   1,
 		AWS:       config.AWSConfig{Profile: "unused", Region: "us-east-2"},
@@ -179,6 +211,7 @@ func doctorTestConfig(root string) config.Config {
 		Models: map[string]config.ModelConfig{"coding": {
 			BedrockModelID: "custom-target",
 			Capabilities: &config.CapabilityConfig{
+				ResponsesAPI:  &responses,
 				ContextWindow: &contextWindow, MaxOutputTokens: &maxOutput, InputModalities: []string{"text", "image"},
 				Reasoning: config.ReasoningCapability{Supported: &reasoning, Efforts: []string{"low", "medium", "high"}},
 				Tools:     config.ToolCapability{FunctionCalling: &functions, ParallelCalls: &parallel},

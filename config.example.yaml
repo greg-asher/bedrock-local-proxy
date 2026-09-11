@@ -24,6 +24,7 @@ models:
     # authoritative documentation. The placeholders below are not defaults.
     # capabilities:
     #   metadata_profile: REPLACE_WITH_EXACT_SUPPORTED_PROFILE
+    #   responses_api: true # required for an unrecognized Codex target; verify against AWS docs
     #   context_window: REPLACE_WITH_DOCUMENTED_INTEGER
     #   max_output_tokens: REPLACE_WITH_DOCUMENTED_INTEGER
     #   input_modalities: [text]
