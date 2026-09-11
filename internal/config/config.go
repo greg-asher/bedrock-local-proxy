@@ -21,15 +21,22 @@ const (
 
 // Config is the complete version 1 configuration file.
 type Config struct {
-	Version int                    `yaml:"version"`
-	AWS     AWSConfig              `yaml:"aws"`
-	Listen  string                 `yaml:"listen"`
-	Models  map[string]ModelConfig `yaml:"models"`
+	Version   int                    `yaml:"version"`
+	AWS       AWSConfig              `yaml:"aws"`
+	Listen    string                 `yaml:"listen"`
+	Reporting ReportingConfig        `yaml:"reporting,omitempty"`
+	Models    map[string]ModelConfig `yaml:"models"`
 }
 
 type AWSConfig struct {
 	Profile string `yaml:"profile"`
 	Region  string `yaml:"region"`
+}
+
+// ReportingConfig controls the parent directory for durable per-session
+// reports. An empty directory uses the user-scoped default.
+type ReportingConfig struct {
+	Directory string `yaml:"directory,omitempty"`
 }
 
 // ModelConfig describes a public model name and its Bedrock target. Pointer
@@ -51,6 +58,45 @@ func DefaultPath() (string, error) {
 		return "", fmt.Errorf("resolve user home directory: %w", err)
 	}
 	return filepath.Join(home, ".config", "bedrock-proxy", "config.yaml"), nil
+}
+
+// DefaultReportDirectory returns the user-scoped parent directory for session
+// reports. XDG_STATE_HOME must be absolute when supplied; a relative value is
+// ignored so reports never depend on an incidental working directory.
+func DefaultReportDirectory() (string, error) {
+	if stateHome := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); stateHome != "" && filepath.IsAbs(stateHome) {
+		return filepath.Join(stateHome, "bedrock-proxy", "sessions"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user home directory: %w", err)
+	}
+	return filepath.Join(home, ".local", "state", "bedrock-proxy", "sessions"), nil
+}
+
+// ResolveReportDirectory chooses the report parent from a CLI override,
+// configuration, or the default. Relative CLI paths use the working
+// directory; relative configuration paths use the configuration file's
+// directory.
+func ResolveReportDirectory(configPath, configuredDirectory, override string) (string, error) {
+	if value := strings.TrimSpace(override); value != "" {
+		path, err := filepath.Abs(value)
+		if err != nil {
+			return "", fmt.Errorf("resolve report directory %q: %w", value, err)
+		}
+		return filepath.Clean(path), nil
+	}
+	if value := strings.TrimSpace(configuredDirectory); value != "" {
+		if filepath.IsAbs(value) {
+			return filepath.Clean(value), nil
+		}
+		absoluteConfig, err := filepath.Abs(configPath)
+		if err != nil {
+			return "", fmt.Errorf("resolve config path %q: %w", configPath, err)
+		}
+		return filepath.Clean(filepath.Join(filepath.Dir(absoluteConfig), value)), nil
+	}
+	return DefaultReportDirectory()
 }
 
 // LoadFile decodes and validates a configuration file. yaml.v3's KnownFields

@@ -30,6 +30,10 @@ bin_dir=${HOME:?HOME must be set}/.local/bin
 config_dir=${HOME:?HOME must be set}/.config/bedrock-proxy
 config_path=$config_dir/config.yaml
 install_path=$bin_dir/bedrock-proxy
+case "${XDG_STATE_HOME-}" in
+	/*) report_dir=$XDG_STATE_HOME/bedrock-proxy/sessions ;;
+	*) report_dir=$HOME/.local/state/bedrock-proxy/sessions ;;
+esac
 
 mkdir -p "$bin_dir"
 
@@ -75,6 +79,7 @@ fi
 printf '%s\n' "Installed: $install_path"
 printf '%s\n' "Version:   $installed_version"
 printf '%s\n' "Config:    $config_path"
+printf '%s\n' "Reports:   $report_dir"
 printf '%s\n' "AWS connectivity: not checked"
 
 case ":${PATH-}:" in

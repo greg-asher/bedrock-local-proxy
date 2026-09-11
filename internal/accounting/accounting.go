@@ -34,11 +34,14 @@ type Recorder struct {
 	models  map[string]config.ModelConfig
 	started time.Time
 	totals  totals
+	session *SessionReporter
 }
 
 type requestRecord struct {
 	Event                          string   `json:"event"`
 	Timestamp                      string   `json:"timestamp"`
+	SessionID                      string   `json:"session_id,omitempty"`
+	SessionTag                     string   `json:"session_tag,omitempty"`
 	Endpoint                       string   `json:"endpoint"`
 	LocalModel                     string   `json:"local_model,omitempty"`
 	UpstreamModel                  string   `json:"upstream_model,omitempty"`
@@ -55,6 +58,11 @@ type requestRecord struct {
 
 type summaryRecord struct {
 	Event                   string  `json:"event"`
+	SessionID               string  `json:"session_id,omitempty"`
+	SessionTag              string  `json:"session_tag,omitempty"`
+	StartedAt               string  `json:"started_at,omitempty"`
+	FinishedAt              string  `json:"finished_at,omitempty"`
+	Status                  string  `json:"status,omitempty"`
 	RuntimeSeconds          float64 `json:"runtime_seconds"`
 	Requests                int     `json:"requests"`
 	Successes               int     `json:"successes"`
@@ -74,6 +82,14 @@ func New(w io.Writer, format Format, models map[string]config.ModelConfig) *Reco
 		copyModels[name] = model
 	}
 	return &Recorder{w: w, format: format, models: copyModels, started: time.Now()}
+}
+
+// SetSessionReporter attaches the durable, metadata-only sink used for one
+// proxy run. It should be called before the server accepts requests.
+func (r *Recorder) SetSessionReporter(reporter *SessionReporter) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.session = reporter
 }
 
 func (r *Recorder) Record(result server.CompletionResult) {
@@ -115,14 +131,16 @@ func (r *Recorder) Record(result server.CompletionResult) {
 			r.totals.knownEstimatedCost += cost
 		}
 	}
-	if r.w == nil {
-		return
+	if r.session != nil {
+		r.session.RecordRequest(entry)
 	}
-	if r.format == FormatJSON {
-		_ = json.NewEncoder(r.w).Encode(entry)
-		return
+	if r.w != nil {
+		if r.format == FormatJSON {
+			_ = json.NewEncoder(r.w).Encode(entry)
+			return
+		}
+		_, _ = fmt.Fprintf(r.w, "request event=%s timestamp=%s endpoint=%s local_model=%s upstream_model=%s outcome=%s http_status=%s latency_ms=%.2f input_tokens=%s output_tokens=%s usage_status=%s estimated_cost=%s cost_status=%s\n", entry.Event, entry.Timestamp, entry.Endpoint, entry.LocalModel, entry.UpstreamModel, entry.Outcome, statusText(entry.HTTPStatus), entry.LatencyMS, tokenText(entry.InputTokens), tokenText(entry.OutputTokens), entry.UsageStatus, costText(entry), entry.CostStatus)
 	}
-	_, _ = fmt.Fprintf(r.w, "request event=%s timestamp=%s endpoint=%s local_model=%s upstream_model=%s outcome=%s http_status=%s latency_ms=%.2f input_tokens=%s output_tokens=%s usage_status=%s estimated_cost=%s cost_status=%s\n", entry.Event, entry.Timestamp, entry.Endpoint, entry.LocalModel, entry.UpstreamModel, entry.Outcome, statusText(entry.HTTPStatus), entry.LatencyMS, tokenText(entry.InputTokens), tokenText(entry.OutputTokens), entry.UsageStatus, costText(entry), entry.CostStatus)
 }
 
 func (r *Recorder) estimate(result server.CompletionResult) (float64, bool) {
@@ -142,18 +160,20 @@ func (r *Recorder) WriteSummary() {
 	if r.totals.missingEstimates == 0 && r.totals.requests > 0 {
 		s.CostStatus = "estimated"
 	}
-	if r.w == nil {
-		return
+	if r.session != nil {
+		r.session.StageSummary(s)
 	}
-	if r.format == FormatJSON {
-		_ = json.NewEncoder(r.w).Encode(s)
-		return
+	if r.w != nil {
+		if r.format == FormatJSON {
+			_ = json.NewEncoder(r.w).Encode(s)
+			return
+		}
+		cost := "unavailable"
+		if s.CostStatus == "estimated" {
+			cost = fmt.Sprintf("$%.8f (estimated)", s.KnownEstimatedCost)
+		}
+		_, _ = fmt.Fprintf(r.w, "Session summary runtime=%.1fs requests=%d successes=%d failures=%d known_input_tokens=%d known_output_tokens=%d estimated_cost=%s missing_usage=%d missing_estimates=%d incomplete_requests=%d\n", s.RuntimeSeconds, s.Requests, s.Successes, s.Failures, s.KnownInputTokens, s.KnownOutputTokens, cost, s.MissingUsageRequests, s.MissingEstimateRequests, s.IncompleteRequests)
 	}
-	cost := "unavailable"
-	if s.CostStatus == "estimated" {
-		cost = fmt.Sprintf("$%.8f (estimated)", s.KnownEstimatedCost)
-	}
-	_, _ = fmt.Fprintf(r.w, "Session summary runtime=%.1fs requests=%d successes=%d failures=%d known_input_tokens=%d known_output_tokens=%d estimated_cost=%s missing_usage=%d missing_estimates=%d incomplete_requests=%d\n", s.RuntimeSeconds, s.Requests, s.Successes, s.Failures, s.KnownInputTokens, s.KnownOutputTokens, cost, s.MissingUsageRequests, s.MissingEstimateRequests, s.IncompleteRequests)
 }
 
 // MarkIncomplete records active handlers that did not publish a completion
