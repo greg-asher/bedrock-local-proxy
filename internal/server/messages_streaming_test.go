@@ -73,7 +73,7 @@ func TestMessagesStreamingForwardsRealTextAndToolEventsIncrementally(t *testing.
 	if recorder.Header().Get("Content-Type") != "text/event-stream" || recorder.Header().Get("X-Request-Id") != "msg-stream-1" {
 		t.Fatalf("stream headers not preserved: %v", recorder.Header())
 	}
-	if resultCount != 1 || result.Endpoint != "/v1/messages" || result.Outcome != CompletionSucceeded || result.InputTokens == nil || *result.InputTokens != 25 || result.OutputTokens == nil || *result.OutputTokens != 6 || !result.ObservedUncoveredBillingFields {
+	if resultCount != 1 || result.Endpoint != "/v1/messages" || result.Outcome != CompletionSucceeded || result.InputTokens == nil || *result.InputTokens != 25 || result.OutputTokens == nil || *result.OutputTokens != 6 || !result.ObservedUncoveredBillingFields || result.FunctionToolCalls != 1 {
 		t.Fatalf("completion result = %+v (count=%d), want one successful result with latest cumulative usage", result, resultCount)
 	}
 	select {

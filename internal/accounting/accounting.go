@@ -61,6 +61,7 @@ type requestRecord struct {
 	MetadataProfile                string   `json:"metadata_profile,omitempty"`
 	MetadataRevision               string   `json:"metadata_revision,omitempty"`
 	CatalogHash                    string   `json:"catalog_hash,omitempty"`
+	SettingsHash                   string   `json:"settings_hash,omitempty"`
 	ContextUtilization             *float64 `json:"context_utilization,omitempty"`
 	OutputUtilization              *float64 `json:"output_utilization,omitempty"`
 	FunctionToolCalls              int      `json:"function_tool_calls,omitempty"`
@@ -117,7 +118,7 @@ func (r *Recorder) Record(result server.CompletionResult) {
 		HTTPStatus: result.HTTPStatus, Outcome: string(result.Outcome), InputTokens: input, OutputTokens: output,
 		CostStatus: "unavailable", UsageStatus: usageStatus, ObservedUncoveredBillingFields: result.ObservedUncoveredBillingFields,
 		ClientFamily: result.ClientFamily, ClientVersion: result.ClientVersion, MetadataProfile: result.MetadataProfile,
-		MetadataRevision: result.MetadataRevision, CatalogHash: result.CatalogHash, FunctionToolCalls: result.FunctionToolCalls,
+		MetadataRevision: result.MetadataRevision, CatalogHash: result.CatalogHash, SettingsHash: result.SettingsHash, FunctionToolCalls: result.FunctionToolCalls,
 		UnsupportedFeatureRejections: result.UnsupportedFeatureRejections}
 	if input != nil && output != nil && result.ContextWindow > 0 {
 		value := float64(*input+*output) / float64(result.ContextWindow)

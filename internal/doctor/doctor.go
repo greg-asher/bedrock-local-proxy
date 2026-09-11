@@ -13,11 +13,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gregasher/bedrock-local-proxy/internal/claude"
 	"github.com/gregasher/bedrock-local-proxy/internal/codex"
 	"github.com/gregasher/bedrock-local-proxy/internal/config"
 )
@@ -51,16 +51,19 @@ func (r Result) OK() bool {
 }
 
 type Options struct {
-	Config       config.Config
-	ConfigPath   string
-	Client       string
-	ModelAlias   string
-	CatalogPath  string
-	ProfilePath  string
-	CodexCommand string
-	CodexRunner  codex.CommandRunner
-	Live         bool
-	HTTPClient   HTTPDoer
+	Config             config.Config
+	ConfigPath         string
+	Client             string
+	ModelAlias         string
+	CatalogPath        string
+	ProfilePath        string
+	CodexCommand       string
+	CodexRunner        codex.CommandRunner
+	ClaudeSettingsPath string
+	ClaudeCommand      string
+	ClaudeRunner       claude.CommandRunner
+	Live               bool
+	HTTPClient         HTTPDoer
 }
 
 type HTTPDoer interface {
@@ -75,29 +78,47 @@ func Run(ctx context.Context, options Options) Result {
 	if client == "" && !options.Live {
 		return result
 	}
-	if client != "" && client != "codex" {
-		result.Checks = append(result.Checks, Check{Name: "client", Status: Failed, Category: "configuration", Message: fmt.Sprintf("unsupported client %q; use codex", client)})
+	if client != "" && client != "codex" && client != "claude" {
+		result.Checks = append(result.Checks, Check{Name: "client", Status: Failed, Category: "configuration", Message: fmt.Sprintf("unsupported client %q; use codex or claude", client)})
 		return result
 	}
-	alias, model, err := selectedModel(options.Config.Models, options.ModelAlias)
+	if client == "claude" {
+		result.Checks = append(result.Checks, runClaude(ctx, options)...)
+		return result
+	}
+	if _, err := codex.ResolveCatalogModels(options.Config, options.ModelAlias); err != nil {
+		category := "configuration"
+		if strings.Contains(err.Error(), "capabilit") || strings.Contains(err.Error(), "Codex-compatible") || strings.Contains(err.Error(), "Responses API") {
+			category = "model_capability"
+		}
+		result.Checks = append(result.Checks, Check{Name: "model selection", Status: Failed, Category: category, Message: err.Error()})
+		return result
+	}
+	version, bundledHash, err := codex.Probe(ctx, options.CodexCommand, options.CodexRunner)
 	if err != nil {
-		result.Checks = append(result.Checks, Check{Name: "model selection", Status: Failed, Category: "configuration", Message: err.Error()})
+		result.Checks = append(result.Checks, Check{Name: "Codex CLI", Status: Failed, Category: "codex_compatibility", Message: err.Error()})
 		return result
 	}
-	capabilities, warnings, err := config.ResolveModelCapabilities(model)
+	resolved, err := codex.ResolveCatalogModelsForVersion(options.Config, options.ModelAlias, version)
 	if err != nil {
-		result.Checks = append(result.Checks, Check{Name: "model capabilities", Status: Failed, Category: "model_capability", Message: err.Error()})
+		category := "configuration"
+		if strings.Contains(err.Error(), "capabilit") || strings.Contains(err.Error(), "Codex-compatible") || strings.Contains(err.Error(), "Responses API") {
+			category = "model_capability"
+		}
+		result.Checks = append(result.Checks, Check{Name: "model selection", Status: Failed, Category: category, Message: err.Error()})
 		return result
 	}
-	if err := config.ValidateCodexCompatibility(model, capabilities); err != nil {
-		result.Checks = append(result.Checks, Check{Name: "Responses compatibility", Status: Failed, Category: "model_capability", Message: err.Error()})
-		return result
-	}
+	alias := resolved.DefaultAlias
+	capabilities := resolved.Capabilities[alias]
 	status := Passed
-	message := fmt.Sprintf("%s: context=%d output=%d modalities=%s", alias, capabilities.ContextWindow, capabilities.MaxOutputTokens, strings.Join(capabilities.InputModalities, ","))
-	if len(warnings) != 0 {
+	message := fmt.Sprintf("default=%s; eligible=%s", alias, strings.Join(resolved.Aliases, ","))
+	if len(resolved.Skipped) != 0 {
 		status = Warning
-		message += "; review overrides: " + strings.Join(warnings, "; ")
+		message += "; skipped=" + formatSkipped(resolved.Skipped)
+	}
+	if len(resolved.Warnings) != 0 {
+		status = Warning
+		message += "; review overrides: " + strings.Join(resolved.Warnings, "; ")
 	}
 	result.Checks = append(result.Checks, Check{Name: "model capabilities", Status: status, Category: "model_capability", Message: message})
 
@@ -127,39 +148,31 @@ func Run(ctx context.Context, options Options) Result {
 		result.Checks = append(result.Checks, Check{Name: "Codex catalog", Status: Failed, Category: "codex_compatibility", Message: fmt.Sprintf("%v; run bedrock-proxy configure codex", err)})
 		return result
 	}
-	if !contains(aliases, alias) {
-		result.Checks = append(result.Checks, Check{Name: "Codex catalog", Status: Failed, Category: "codex_compatibility", Message: fmt.Sprintf("catalog does not contain model %q; regenerate it", alias)})
-		return result
-	}
-	if err := codex.ValidateConfiguration(metadata, alias, model, capabilities); err != nil {
+	if err := codex.ValidateCatalogConfigurations(metadata, resolved); err != nil {
 		result.Checks = append(result.Checks, Check{Name: "Codex catalog configuration", Status: Failed, Category: "codex_compatibility", Message: err.Error()})
 		return result
 	}
-	result.Checks = append(result.Checks, Check{Name: "Codex catalog configuration", Status: Passed, Category: "codex_compatibility", Message: "generated metadata matches the current proxy configuration"})
+	result.Checks = append(result.Checks, Check{Name: "Codex catalog configuration", Status: Passed, Category: "codex_compatibility", Message: "generated metadata matches all eligible proxy models: " + strings.Join(aliases, ", ")})
 	result.Checks = append(result.Checks, Check{Name: "Codex catalog", Status: Passed, Category: "codex_compatibility", Message: catalogPath})
 
-	version, bundledHash, err := codex.Probe(ctx, options.CodexCommand, options.CodexRunner)
-	if err != nil {
-		result.Checks = append(result.Checks, Check{Name: "Codex CLI", Status: Failed, Category: "codex_compatibility", Message: err.Error()})
-		return result
-	}
 	if version != metadata.CodexVersion || bundledHash != metadata.BundledCatalogHash {
 		result.Checks = append(result.Checks, Check{Name: "Codex catalog drift", Status: Failed, Category: "codex_compatibility", Message: fmt.Sprintf("generated for Codex %s but installed Codex is %s; regenerate the catalog", metadata.CodexVersion, version)})
 		return result
 	}
 	result.Checks = append(result.Checks, Check{Name: "Codex catalog drift", Status: Passed, Category: "codex_compatibility", Message: "generated catalog matches installed Codex " + version})
-	if err := codex.ValidateWithCodex(ctx, options.CodexCommand, catalogPath, []string{alias}, options.CodexRunner); err != nil {
+	if err := codex.ValidateWithCodex(ctx, options.CodexCommand, catalogPath, aliases, options.CodexRunner); err != nil {
 		result.Checks = append(result.Checks, Check{Name: "Codex catalog parsing", Status: Failed, Category: "codex_compatibility", Message: err.Error()})
 		return result
 	}
 	result.Checks = append(result.Checks, Check{Name: "Codex catalog parsing", Status: Passed, Category: "codex_compatibility", Message: "installed Codex accepts the generated catalog"})
 	if metadata.OutputLimitVisible {
-		result.Checks = append(result.Checks, Check{Name: "Codex output ceiling", Status: Passed, Category: "codex_compatibility", Message: fmt.Sprintf("Codex consumes the configured %d-token output ceiling", capabilities.MaxOutputTokens)})
+		result.Checks = append(result.Checks, Check{Name: "Codex output ceiling", Status: Passed, Category: "codex_compatibility", Message: "Codex consumes configured output ceilings for all catalog models"})
 	} else {
-		message := fmt.Sprintf("Codex %s does not expose max_output_tokens in its model catalog; the proxy enforces the %d-token ceiling", metadata.CodexVersion, capabilities.MaxOutputTokens)
-		if model.MaxTokens != nil {
-			message += fmt.Sprintf(" and inserts the configured %d-token request default", *model.MaxTokens)
+		ceilings := make([]string, 0, len(resolved.Aliases))
+		for _, localAlias := range resolved.Aliases {
+			ceilings = append(ceilings, fmt.Sprintf("%s=%d", localAlias, resolved.Capabilities[localAlias].MaxOutputTokens))
 		}
+		message := fmt.Sprintf("Codex %s does not expose max_output_tokens in its model catalog; the proxy enforces configured ceilings (%s)", metadata.CodexVersion, strings.Join(ceilings, ", "))
 		result.Checks = append(result.Checks, Check{Name: "Codex output ceiling", Status: Warning, Category: "codex_compatibility", Message: message})
 	}
 
@@ -173,6 +186,70 @@ func Run(ctx context.Context, options Options) Result {
 		result.Checks = append(result.Checks, runLive(ctx, options, alias, capabilities)...)
 	}
 	return result
+}
+
+func runClaude(ctx context.Context, options Options) []Check {
+	checks := []Check{}
+	version, err := claude.Probe(ctx, options.ClaudeCommand, options.ClaudeRunner)
+	if err != nil {
+		return append(checks, Check{Name: "Claude CLI", Status: Failed, Category: "claude_compatibility", Message: err.Error()})
+	}
+	resolved, err := claude.ResolveModels(options.Config, options.ModelAlias)
+	if err != nil {
+		category := "configuration"
+		if strings.Contains(err.Error(), "capabilit") || strings.Contains(err.Error(), "Claude-compatible") || strings.Contains(err.Error(), "Messages API") {
+			category = "model_capability"
+		}
+		return append(checks, Check{Name: "model selection", Status: Failed, Category: category, Message: err.Error()})
+	}
+	status := Passed
+	message := fmt.Sprintf("default=%s; subagent=%s; eligible=%s", resolved.DefaultAlias, resolved.SubagentAlias, strings.Join(resolved.Aliases, ","))
+	if len(resolved.Skipped) != 0 {
+		status = Warning
+		message += "; skipped=" + formatClaudeSkipped(resolved.Skipped)
+	}
+	if len(resolved.Warnings) != 0 {
+		status = Warning
+		message += "; review overrides: " + strings.Join(resolved.Warnings, "; ")
+	}
+	checks = append(checks, Check{Name: "model capabilities", Status: status, Category: "model_capability", Message: message})
+
+	settingsPath := strings.TrimSpace(options.ClaudeSettingsPath)
+	if settingsPath == "" {
+		settingsPath, err = claude.DefaultSettingsPath(options.ConfigPath)
+		if err != nil {
+			return append(checks, Check{Name: "Claude settings", Status: Failed, Category: "claude_compatibility", Message: err.Error()})
+		}
+	}
+	hash, err := claude.ValidateSettings(settingsPath, options.Config.Listen, resolved)
+	if err != nil {
+		return append(checks, Check{Name: "Claude settings", Status: Failed, Category: "claude_compatibility", Message: fmt.Sprintf("%v; run bedrock-proxy configure claude", err)})
+	}
+	checks = append(checks, Check{Name: "Claude settings", Status: Passed, Category: "claude_compatibility", Message: settingsPath + " (hash " + hash + ")"})
+	if err := claude.ValidateWithClaude(ctx, options.ClaudeCommand, settingsPath, options.ClaudeRunner); err != nil {
+		return append(checks, Check{Name: "Claude settings parsing", Status: Failed, Category: "claude_compatibility", Message: err.Error()})
+	}
+	if err := claude.ValidateOfflineRequest(ctx, options.ClaudeCommand, settingsPath, options.ClaudeRunner); err != nil {
+		return append(checks, Check{Name: "Claude offline request", Status: Failed, Category: "claude_compatibility", Message: err.Error()})
+	}
+	checks = append(checks,
+		Check{Name: "Claude CLI", Status: Passed, Category: "claude_compatibility", Message: "installed Claude Code " + version + " supports generated multi-model settings"},
+		Check{Name: "Claude settings parsing", Status: Passed, Category: "claude_compatibility", Message: "installed Claude Code accepts the generated settings"},
+		Check{Name: "Claude offline request", Status: Passed, Category: "claude_compatibility", Message: "isolated Claude Code request used the configured alias without AWS credentials"},
+	)
+	if options.Live {
+		alias := resolved.DefaultAlias
+		checks = append(checks, runLiveClaude(ctx, options, alias, resolved.Capabilities[alias], hash)...)
+	}
+	return checks
+}
+
+func formatClaudeSkipped(models []claude.SkippedModel) string {
+	values := make([]string, 0, len(models))
+	for _, model := range models {
+		values = append(values, model.Alias+" ("+model.Reason+")")
+	}
+	return strings.Join(values, "; ")
 }
 
 func DefaultProfilePath() (string, error) {
@@ -227,27 +304,12 @@ func reportDirectoryCheck(configPath string, cfg config.Config) Check {
 	return Check{Name: "report directory", Status: Passed, Category: "configuration", Message: path}
 }
 
-func selectedModel(models map[string]config.ModelConfig, requested string) (string, config.ModelConfig, error) {
-	requested = strings.TrimSpace(requested)
-	if requested != "" {
-		model, ok := models[requested]
-		if !ok {
-			return "", config.ModelConfig{}, fmt.Errorf("unknown model %q", requested)
-		}
-		return requested, model, nil
+func formatSkipped(models []codex.SkippedModel) string {
+	values := make([]string, 0, len(models))
+	for _, model := range models {
+		values = append(values, model.Alias+" ("+model.Reason+")")
 	}
-	if len(models) != 1 {
-		names := make([]string, 0, len(models))
-		for name := range models {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		return "", config.ModelConfig{}, fmt.Errorf("--model is required when configuration contains multiple models (configured: %s)", strings.Join(names, ", "))
-	}
-	for alias, model := range models {
-		return alias, model, nil
-	}
-	return "", config.ModelConfig{}, errors.New("configuration contains no models")
+	return strings.Join(values, "; ")
 }
 
 type profileFile struct {
@@ -344,15 +406,6 @@ func profileCatalogPath(path string) (string, error) {
 	return profile.ModelCatalogJSON, nil
 }
 
-func contains(values []string, wanted string) bool {
-	for _, value := range values {
-		if value == wanted {
-			return true
-		}
-	}
-	return false
-}
-
 func runLive(ctx context.Context, options Options, alias string, capabilities config.ResolvedCapabilities) []Check {
 	client := options.HTTPClient
 	if client == nil {
@@ -380,6 +433,215 @@ func runLive(ctx context.Context, options Options, alias string, capabilities co
 		checks = append(checks, Check{Name: "live streaming cancellation", Status: Passed, Category: "protocol", Message: "stream opened and canceled cleanly"})
 	}
 	return checks
+}
+
+func runLiveClaude(ctx context.Context, options Options, alias string, capabilities config.ResolvedCapabilities, settingsHash string) []Check {
+	client := options.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 90 * time.Second}
+	}
+	baseURL := "http://" + options.Config.Listen
+	checks := []Check{}
+	if err := checkModels(ctx, client, baseURL, alias); err != nil {
+		return append(checks, liveFailure("live model discovery", err))
+	}
+	checks = append(checks, Check{Name: "live model discovery", Status: Passed, Category: "protocol", Message: "list and retrieve routes contain " + alias})
+	if err := checkClaudeNormal(ctx, client, baseURL, alias, capabilities.MaxOutputTokens, settingsHash); err != nil {
+		return append(checks, liveFailure("live Claude response", err))
+	}
+	checks = append(checks, Check{Name: "live Claude response", Status: Passed, Category: "protocol", Message: "completed Messages response with usage"})
+	if err := checkClaudeFunctionLoop(ctx, client, baseURL, alias, capabilities.MaxOutputTokens, settingsHash); err != nil {
+		return append(checks, liveFailure("live Claude tool loop", err))
+	}
+	checks = append(checks, Check{Name: "live Claude tool loop", Status: Passed, Category: "model_capability", Message: "tool use and result continuation completed"})
+	if capabilities.ReasoningSupported {
+		if err := checkClaudeReasoning(ctx, client, baseURL, alias, capabilities.MaxOutputTokens, capabilities.ReasoningEfforts, settingsHash); err != nil {
+			return append(checks, liveFailure("live Claude reasoning", err))
+		}
+		checks = append(checks, Check{Name: "live Claude reasoning", Status: Passed, Category: "model_capability", Message: "configured effort request completed with usage"})
+	}
+	if completed, err := checkClaudeStreamingCancellation(ctx, client, baseURL, alias, capabilities.MaxOutputTokens, settingsHash); err != nil {
+		return append(checks, liveFailure("live Claude streaming cancellation", err))
+	} else if completed {
+		checks = append(checks, Check{Name: "live Claude streaming cancellation", Status: Warning, Category: "protocol", Message: "stream completed before cancellation could be observed"})
+	} else {
+		checks = append(checks, Check{Name: "live Claude streaming cancellation", Status: Passed, Category: "protocol", Message: "stream opened and canceled cleanly"})
+	}
+	return checks
+}
+
+func checkClaudeNormal(ctx context.Context, client HTTPDoer, baseURL, alias string, ceiling int64, settingsHash string) error {
+	body := map[string]any{
+		"model": alias, "max_tokens": diagnosticOutputLimit(ceiling, 16),
+		"messages": []any{map[string]any{"role": "user", "content": "Reply with OK."}},
+	}
+	response, err := doClaudeJSON(ctx, client, baseURL+"/v1/messages", body, settingsHash)
+	if err != nil {
+		return err
+	}
+	return validateClaudeMessage(response)
+}
+
+func checkClaudeFunctionLoop(ctx context.Context, client HTTPDoer, baseURL, alias string, ceiling int64, settingsHash string) error {
+	tool := map[string]any{
+		"name": "bedrock_proxy_doctor", "description": "Return a diagnostic marker supplied by the caller.",
+		"input_schema": map[string]any{"type": "object", "properties": map[string]any{"value": map[string]any{"type": "string"}}, "required": []string{"value"}},
+	}
+	first := map[string]any{
+		"model": alias, "max_tokens": diagnosticOutputLimit(ceiling, 64),
+		"messages": []any{map[string]any{"role": "user", "content": "Call bedrock_proxy_doctor once with value ok."}},
+		"tools":    []any{tool}, "tool_choice": map[string]any{"type": "tool", "name": "bedrock_proxy_doctor"},
+	}
+	response, err := doClaudeJSON(ctx, client, baseURL+"/v1/messages", first, settingsHash)
+	if err != nil {
+		return err
+	}
+	data, err := readResponse(response)
+	if err != nil {
+		return err
+	}
+	var result struct {
+		Content []struct {
+			Type  string         `json:"type"`
+			ID    string         `json:"id"`
+			Name  string         `json:"name"`
+			Input map[string]any `json:"input"`
+		} `json:"content"`
+		Usage json.RawMessage `json:"usage"`
+	}
+	if json.Unmarshal(data, &result) != nil || len(result.Usage) == 0 {
+		return errors.New("tool response was malformed or missing usage")
+	}
+	var call map[string]any
+	for _, block := range result.Content {
+		if block.Type == "tool_use" && block.ID != "" && block.Name == "bedrock_proxy_doctor" {
+			call = map[string]any{"type": block.Type, "id": block.ID, "name": block.Name, "input": block.Input}
+			break
+		}
+	}
+	if call == nil {
+		return errors.New("model did not return the required tool_use block")
+	}
+	second := map[string]any{
+		"model": alias, "max_tokens": diagnosticOutputLimit(ceiling, 64), "tools": []any{tool},
+		"messages": []any{
+			map[string]any{"role": "user", "content": "Call bedrock_proxy_doctor once with value ok."},
+			map[string]any{"role": "assistant", "content": []any{call}},
+			map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": call["id"], "content": "ok"}}},
+		},
+	}
+	response, err = doClaudeJSON(ctx, client, baseURL+"/v1/messages", second, settingsHash)
+	if err != nil {
+		return err
+	}
+	return validateClaudeMessage(response)
+}
+
+func checkClaudeReasoning(ctx context.Context, client HTTPDoer, baseURL, alias string, ceiling int64, efforts []string, settingsHash string) error {
+	effort := preferredReasoningEffort(efforts)
+	if effort == "" {
+		return errors.New("reasoning is enabled but no effort is configured")
+	}
+	body := map[string]any{
+		"model": alias, "max_tokens": diagnosticOutputLimit(ceiling, 64),
+		"output_config": map[string]any{"effort": effort},
+		"messages":      []any{map[string]any{"role": "user", "content": "Reply with OK."}},
+	}
+	response, err := doClaudeJSON(ctx, client, baseURL+"/v1/messages", body, settingsHash)
+	if err != nil {
+		return err
+	}
+	return validateClaudeMessage(response)
+}
+
+func preferredReasoningEffort(efforts []string) string {
+	for _, effort := range efforts {
+		if effort == "high" {
+			return effort
+		}
+	}
+	if len(efforts) != 0 {
+		return efforts[0]
+	}
+	return ""
+}
+
+func checkClaudeStreamingCancellation(ctx context.Context, client HTTPDoer, baseURL, alias string, ceiling int64, settingsHash string) (bool, error) {
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	body := map[string]any{
+		"model": alias, "max_tokens": diagnosticOutputLimit(ceiling, 512), "stream": true,
+		"messages": []any{map[string]any{"role": "user", "content": "Write a numbered list of 100 short items."}},
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return false, err
+	}
+	response, err := doClaudeRequest(streamCtx, client, baseURL+"/v1/messages", data, settingsHash)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64*1024))
+		return false, &liveError{Status: response.StatusCode}
+	}
+	scanner := bufio.NewScanner(response.Body)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "event:") {
+			continue
+		}
+		if strings.Contains(line, `"type":"message_stop"`) || strings.Contains(line, `"type": "message_stop"`) {
+			return true, nil
+		}
+		cancel()
+		if scanner.Scan() {
+			return false, errors.New("stream continued after cancellation")
+		}
+		return false, nil
+	}
+	if err := scanner.Err(); err != nil && !errors.Is(err, context.Canceled) {
+		return false, err
+	}
+	return false, errors.New("stream ended before emitting an event")
+}
+
+func validateClaudeMessage(response *http.Response) error {
+	data, err := readResponse(response)
+	if err != nil {
+		return err
+	}
+	var result struct {
+		Type  string          `json:"type"`
+		Usage json.RawMessage `json:"usage"`
+	}
+	if json.Unmarshal(data, &result) != nil || result.Type != "message" || len(result.Usage) == 0 || string(result.Usage) == "null" {
+		return errors.New("Messages response was not a message with usage")
+	}
+	return nil
+}
+
+func doClaudeJSON(ctx context.Context, client HTTPDoer, url string, body any, settingsHash string) (*http.Response, error) {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	return doClaudeRequest(ctx, client, url, data, settingsHash)
+}
+
+func doClaudeRequest(ctx context.Context, client HTTPDoer, url string, body []byte, settingsHash string) (*http.Response, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("x-api-key", "local")
+	request.Header.Set("anthropic-version", "2023-06-01")
+	if settingsHash != "" {
+		request.Header.Set(claude.SettingsHeader, settingsHash)
+	}
+	return client.Do(request)
 }
 
 type liveError struct {

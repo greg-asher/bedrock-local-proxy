@@ -94,11 +94,13 @@ esac
 printf '%s\n' "Next steps:"
 if [ "$config_created" -eq 1 ]; then
 	printf '%s\n' "  1. Edit $config_path and set the AWS profile, target ID, and documented capabilities."
-	printf '%s\n' "  2. For Codex, run: bedrock-proxy configure codex --model coding"
+	printf '%s\n' "  2. For Codex, run: bedrock-proxy configure codex"
 else
 	printf '%s\n' "  1. Check $config_path for its configured model, capabilities, and AWS profile."
-	printf '%s\n' "  2. For Codex, regenerate metadata: bedrock-proxy configure codex --model coding"
+	printf '%s\n' "  2. For Codex, regenerate metadata: bedrock-proxy configure codex"
 fi
-	printf '%s\n' "  3. Check locally: bedrock-proxy doctor --client codex --model coding"
-	printf '%s\n' "  4. Sign in with: aws sso login --profile YOUR_AWS_PROFILE"
-	printf '%s\n' "  5. Run: bedrock-proxy"
+	printf '%s\n' "  3. For Claude Code 2.1.242+, run: bedrock-proxy configure claude"
+	printf '%s\n' "  4. Check locally: bedrock-proxy doctor --client codex"
+	printf '%s\n' "  5. Check Claude locally: bedrock-proxy doctor --client claude"
+	printf '%s\n' "  6. Sign in with: aws sso login --profile YOUR_AWS_PROFILE"
+	printf '%s\n' "  7. Run: bedrock-proxy"

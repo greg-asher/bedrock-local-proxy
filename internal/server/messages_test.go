@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gregasher/bedrock-local-proxy/internal/config"
 	"github.com/gregasher/bedrock-local-proxy/internal/transport"
 )
 
@@ -19,7 +20,7 @@ func TestMessagesTransformsNativeAnthropicRequest(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader(responseBody)),
 	}}
 	s := NewWithTransport(chatTestConfig(), fake)
-	requestBody := `{"model":"coding","max_tokens":0,"temperature":null,"system":[{"type":"text","text":"follow the policy","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"look this up"}]},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"n":9007199254740993123456789}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"result"}]}]}],"tools":[{"name":"lookup","description":"lookup a value","input_schema":{"type":"object","properties":{"n":{"type":"integer"}}}}],"thinking":{"type":"enabled","budget_tokens":1024},"unknown_number":9007199254740993123456789}`
+	requestBody := `{"model":"coding","max_tokens":1,"temperature":null,"system":[{"type":"text","text":"follow the policy","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"look this up"}]},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"n":9007199254740993123456789}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"result"}]}]}],"tools":[{"name":"lookup","description":"lookup a value","input_schema":{"type":"object","properties":{"n":{"type":"integer"}}}}],"thinking":{"type":"enabled","budget_tokens":1024},"unknown_number":9007199254740993123456789}`
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages?beta=true", strings.NewReader(requestBody))
 	request.Header.Set("anthropic-version", "2023-06-01")
 	request.Header.Set("anthropic-beta", "prompt-caching-2024-07-31")
@@ -49,7 +50,7 @@ func TestMessagesTransformsNativeAnthropicRequest(t *testing.T) {
 	if string(got["model"]) != `"us.anthropic.claude-sonnet-test-v1:0"` {
 		t.Fatalf("model = %s, want configured Bedrock target", got["model"])
 	}
-	if string(got["temperature"]) != "null" || string(got["max_tokens"]) != "0" {
+	if string(got["temperature"]) != "null" || string(got["max_tokens"]) != "1" {
 		t.Fatalf("explicit defaults were overwritten: temperature=%s max_tokens=%s", got["temperature"], got["max_tokens"])
 	}
 	if string(got["unknown_number"]) != "9007199254740993123456789" {
@@ -246,5 +247,70 @@ func TestMessagesCanceledTransportRecordsCanceledOutcome(t *testing.T) {
 	}
 	if recorder.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want generic 502 for canceled transport fake", recorder.Code)
+	}
+}
+
+func TestMessagesRejectsKnownIncompatibleTargetBeforeAWS(t *testing.T) {
+	cfg := chatTestConfig()
+	cfg.Models["coding"] = config.ModelConfig{BedrockModelID: "openai.gpt-oss-120b-1:0"}
+	fake := &fakeRequestDoer{}
+	s := NewWithTransport(cfg, fake)
+	var result CompletionResult
+	s.SetCompletionRecorder(func(got CompletionResult) { result = got })
+	recorder := httptest.NewRecorder()
+	s.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"coding","max_tokens":16,"messages":[]}`)))
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "does not support the Messages API") || fake.request != nil {
+		t.Fatalf("response=(%d,%q) upstream=%v", recorder.Code, recorder.Body.String(), fake.request)
+	}
+	if result.UnsupportedFeatureRejections != 1 || result.UpstreamModel != "openai.gpt-oss-120b-1:0" {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestMessagesEnforcesPositiveConfiguredOutputCeiling(t *testing.T) {
+	maxOutput, contextWindow := int64(32), int64(1000)
+	functions, parallel, reasoning, messages := true, false, false, true
+	cfg := chatTestConfig()
+	model := cfg.Models["coding"]
+	model.Capabilities = &config.CapabilityConfig{
+		MessagesAPI: &messages, AnthropicModelID: "claude-test-1",
+		ContextWindow: &contextWindow, MaxOutputTokens: &maxOutput, InputModalities: []string{"text"},
+		Reasoning: config.ReasoningCapability{Supported: &reasoning},
+		Tools:     config.ToolCapability{FunctionCalling: &functions, ParallelCalls: &parallel},
+	}
+	cfg.Models["coding"] = model
+	for _, test := range []struct {
+		body string
+		want string
+	}{
+		{body: `{"model":"coding","max_tokens":0,"messages":[]}`, want: "positive integer"},
+		{body: `{"model":"coding","max_tokens":33,"messages":[]}`, want: "exceeds the configured model ceiling 32"},
+	} {
+		fake := &fakeRequestDoer{}
+		s := NewWithTransport(cfg, fake)
+		recorder := httptest.NewRecorder()
+		s.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(test.body)))
+		if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), test.want) || fake.request != nil {
+			t.Fatalf("body=%s response=(%d,%q) upstream=%v", test.body, recorder.Code, recorder.Body.String(), fake.request)
+		}
+	}
+}
+
+func TestMessagesRecordsSafeClaudeMetadataAndStripsSettingsHeader(t *testing.T) {
+	const responseBody = `{"id":"msg_test","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"secret-tool","input":{"secret":"value"}}],"model":"target","stop_reason":"tool_use","usage":{"input_tokens":12,"output_tokens":7}}`
+	fake := &fakeRequestDoer{response: &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(responseBody))}}
+	s := NewWithTransport(chatTestConfig(), fake)
+	var result CompletionResult
+	s.SetCompletionRecorder(func(got CompletionResult) { result = got })
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"coding","messages":[]}`))
+	request.Header.Set("User-Agent", "claude-code/2.1.242")
+	request.Header.Set("X-Bedrock-Proxy-Claude-Settings", strings.Repeat("a", 64))
+	recorder := httptest.NewRecorder()
+	s.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || fake.request.Header.Get("X-Bedrock-Proxy-Claude-Settings") != "" {
+		t.Fatalf("status=%d upstream headers=%v", recorder.Code, fake.request.Header)
+	}
+	if result.ClientFamily != "claude-code" || result.ClientVersion != "2.1.242" || result.SettingsHash != strings.Repeat("a", 64) || result.FunctionToolCalls != 1 {
+		t.Fatalf("result = %+v", result)
 	}
 }

@@ -40,6 +40,7 @@ type Report struct {
 	Clients          []Breakdown `json:"clients"`
 	MetadataProfiles []Breakdown `json:"metadata_profiles"`
 	Catalogs         []Breakdown `json:"catalogs"`
+	ClaudeSettings   []Breakdown `json:"claude_settings"`
 }
 
 type Metrics struct {
@@ -106,6 +107,7 @@ type event struct {
 	MetadataProfile              string   `json:"metadata_profile"`
 	MetadataRevision             string   `json:"metadata_revision"`
 	CatalogHash                  string   `json:"catalog_hash"`
+	SettingsHash                 string   `json:"settings_hash"`
 	ContextUtilization           *float64 `json:"context_utilization"`
 	OutputUtilization            *float64 `json:"output_utilization"`
 	FunctionToolCalls            int      `json:"function_tool_calls"`
@@ -140,6 +142,7 @@ func Generate(options Options) (Report, error) {
 	byClient := map[string]*Breakdown{}
 	byProfile := map[string]*Breakdown{}
 	byCatalog := map[string]*Breakdown{}
+	byClaudeSettings := map[string]*Breakdown{}
 	var contextTotal, outputTotal float64
 	var contextSamples, outputSamples int
 	contributingSessions := map[string]struct{}{}
@@ -190,6 +193,7 @@ func Generate(options Options) (Report, error) {
 			applyBreakdown(byClient, clientLabel(item), item)
 			applyBreakdown(byProfile, profileLabel(item), item)
 			applyBreakdown(byCatalog, label(item.CatalogHash, "no catalog marker"), item)
+			applyBreakdown(byClaudeSettings, label(item.SettingsHash, "no Claude settings marker"), item)
 			if item.ContextUtilization != nil {
 				contextTotal += *item.ContextUtilization
 				contextSamples++
@@ -208,6 +212,7 @@ func Generate(options Options) (Report, error) {
 	report.Clients = orderedBreakdowns(byClient)
 	report.MetadataProfiles = orderedBreakdowns(byProfile)
 	report.Catalogs = orderedBreakdowns(byCatalog)
+	report.ClaudeSettings = orderedBreakdowns(byClaudeSettings)
 	if contextSamples > 0 {
 		report.Metrics.AverageContextUtilization = contextTotal / float64(contextSamples)
 	}
@@ -442,5 +447,5 @@ body{font:15px system-ui,sans-serif;max-width:1120px;margin:32px auto;padding:0 
 <div class="cards"><div class="card"><span>Requests</span><b>{{.Report.Metrics.Requests}}</b></div><div class="card"><span>Success rate</span><b>{{.SuccessRate}}</b></div><div class="card"><span>Estimated cost</span><b>${{printf "%.4f" .Report.Metrics.KnownEstimatedCost}}</b></div><div class="card"><span>Tokens</span><b>{{.Report.Metrics.KnownInputTokens}} / {{.Report.Metrics.KnownOutputTokens}}</b><span>input / output</span></div><div class="card"><span>Function calls</span><b>{{.Report.Metrics.FunctionToolCalls}}</b></div><div class="card"><span>Unsupported features</span><b>{{.Report.Metrics.UnsupportedFeatureRejections}}</b></div><div class="card"><span>Sessions</span><b>{{.Report.Sessions}}</b></div></div>
 <section><h2>Coverage</h2><p>{{.Report.Metrics.Successes}} successful · {{.Report.Metrics.Failures}} failed ({{.Report.Metrics.Canceled}} canceled) · {{.Report.Metrics.MissingUsageRequests}} requests without complete usage · {{.Report.Metrics.MissingCostRequests}} requests without an estimate · {{.Report.Metrics.ModelListEvents}} model-list events excluded from totals · {{.Report.SkippedSessions}} unreadable or unrecognized session directories skipped.</p></section>
 <div class="charts"><section><h2>Requests over time</h2><div class="chart">{{range .RequestBars}}<div class="bar" style="height:{{.Height}}px" title="{{.Label}}: {{.Value}}"></div>{{end}}</div></section><section><h2>Estimated cost over time</h2><div class="chart cost">{{range .CostBars}}<div class="bar" style="height:{{.Height}}px" title="{{.Label}}: {{.Value}}"></div>{{end}}</div></section></div>
-{{template "breakdown" .Report.Models}}<section><h2>Endpoint breakdown</h2>{{template "rows" .Report.Endpoints}}</section><section><h2>Session tag breakdown</h2>{{template "rows" .Report.SessionTags}}</section><section><h2>Client compatibility breakdown</h2>{{template "rows" .Report.Clients}}</section><section><h2>Metadata profile breakdown</h2>{{template "rows" .Report.MetadataProfiles}}</section><section><h2>Catalog breakdown</h2>{{template "rows" .Report.Catalogs}}</section>
+{{template "breakdown" .Report.Models}}<section><h2>Endpoint breakdown</h2>{{template "rows" .Report.Endpoints}}</section><section><h2>Session tag breakdown</h2>{{template "rows" .Report.SessionTags}}</section><section><h2>Client compatibility breakdown</h2>{{template "rows" .Report.Clients}}</section><section><h2>Metadata profile breakdown</h2>{{template "rows" .Report.MetadataProfiles}}</section><section><h2>Catalog breakdown</h2>{{template "rows" .Report.Catalogs}}</section><section><h2>Claude settings breakdown</h2>{{template "rows" .Report.ClaudeSettings}}</section>
 </body></html>{{define "breakdown"}}<section><h2>Model breakdown</h2>{{template "rows" .}}</section>{{end}}{{define "rows"}}<table><thead><tr><th>Name</th><th>Requests</th><th>Successes</th><th>Failures</th><th>Input tokens</th><th>Output tokens</th><th>Estimated cost</th></tr></thead><tbody>{{range .}}<tr><td>{{.Name}}</td><td>{{.Requests}}</td><td>{{.Successes}}</td><td>{{.Failures}}</td><td>{{.KnownInputTokens}}</td><td>{{.KnownOutputTokens}}</td><td>${{printf "%.6f" .KnownEstimatedCost}}</td></tr>{{else}}<tr><td colspan="7">No generation requests in this period.</td></tr>{{end}}</tbody></table>{{end}}`))

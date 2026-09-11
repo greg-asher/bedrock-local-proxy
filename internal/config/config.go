@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -25,6 +26,8 @@ type Config struct {
 	AWS       AWSConfig              `yaml:"aws"`
 	Listen    string                 `yaml:"listen"`
 	Reporting ReportingConfig        `yaml:"reporting,omitempty"`
+	Codex     CodexConfig            `yaml:"codex,omitempty"`
+	Claude    ClaudeConfig           `yaml:"claude,omitempty"`
 	Models    map[string]ModelConfig `yaml:"models"`
 }
 
@@ -37,6 +40,19 @@ type AWSConfig struct {
 // reports. An empty directory uses the user-scoped default.
 type ReportingConfig struct {
 	Directory string `yaml:"directory,omitempty"`
+}
+
+// CodexConfig controls the generated Codex client profile. The catalog still
+// contains every eligible proxy model.
+type CodexConfig struct {
+	DefaultModel string `yaml:"default_model,omitempty"`
+}
+
+// ClaudeConfig controls the generated Claude Code settings. SubagentModel
+// defaults to the effective main model when omitted.
+type ClaudeConfig struct {
+	DefaultModel  string `yaml:"default_model,omitempty"`
+	SubagentModel string `yaml:"subagent_model,omitempty"`
 }
 
 // ModelConfig describes a public model name and its Bedrock target. Pointer
@@ -151,7 +167,37 @@ func (c *Config) Validate() error {
 	if len(c.Models) == 0 {
 		return errors.New("models must contain at least one model")
 	}
-	for name, model := range c.Models {
+	if c.Codex.DefaultModel != strings.TrimSpace(c.Codex.DefaultModel) {
+		return errors.New("codex.default_model must not have surrounding whitespace")
+	}
+	if c.Codex.DefaultModel != "" {
+		if _, ok := c.Models[c.Codex.DefaultModel]; !ok {
+			return fmt.Errorf("codex.default_model %q is not a configured model", c.Codex.DefaultModel)
+		}
+	}
+	if c.Claude.DefaultModel != strings.TrimSpace(c.Claude.DefaultModel) {
+		return errors.New("claude.default_model must not have surrounding whitespace")
+	}
+	if c.Claude.SubagentModel != strings.TrimSpace(c.Claude.SubagentModel) {
+		return errors.New("claude.subagent_model must not have surrounding whitespace")
+	}
+	for _, selection := range []struct{ field, alias string }{
+		{field: "claude.default_model", alias: c.Claude.DefaultModel},
+		{field: "claude.subagent_model", alias: c.Claude.SubagentModel},
+	} {
+		if selection.alias != "" {
+			if _, ok := c.Models[selection.alias]; !ok {
+				return fmt.Errorf("%s %q is not a configured model", selection.field, selection.alias)
+			}
+		}
+	}
+	modelNames := make([]string, 0, len(c.Models))
+	for name := range c.Models {
+		modelNames = append(modelNames, name)
+	}
+	sort.Strings(modelNames)
+	for _, name := range modelNames {
+		model := c.Models[name]
 		if strings.TrimSpace(name) == "" {
 			return errors.New("model names must not be empty")
 		}

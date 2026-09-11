@@ -29,6 +29,54 @@ func TestValidateDefaultsListenAndAllowsSharedTarget(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsConfiguredCodexDefault(t *testing.T) {
+	cfg := validConfig()
+	cfg.Codex.DefaultModel = "coding"
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateRejectsInvalidCodexDefault(t *testing.T) {
+	for _, value := range []string{"missing", " coding"} {
+		cfg := validConfig()
+		cfg.Codex.DefaultModel = value
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "codex.default_model") {
+			t.Fatalf("default %q error=%v", value, err)
+		}
+	}
+}
+
+func TestLoadFileReadsCodexDefaultModel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := "version: 1\naws:\n  profile: p\n  region: us-east-2\ncodex:\n  default_model: luna\nmodels:\n  luna:\n    bedrock_model_id: target\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Codex.DefaultModel != "luna" {
+		t.Fatalf("default model=%q", cfg.Codex.DefaultModel)
+	}
+}
+
+func TestLoadFileReadsClaudeDefaultsWithoutChangingVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := "version: 1\naws:\n  profile: p\n  region: us-east-2\nclaude:\n  default_model: fable\n  subagent_model: sonnet\nmodels:\n  fable:\n    bedrock_model_id: target-a\n  sonnet:\n    bedrock_model_id: target-b\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Version != 1 || cfg.Claude.DefaultModel != "fable" || cfg.Claude.SubagentModel != "sonnet" {
+		t.Fatalf("config = %+v", cfg)
+	}
+}
+
 func TestDefaultPathIsHomeScoped(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -173,11 +221,87 @@ func TestResolveModelCapabilitiesUsesResponsesCompatibleGPTOSSProfile(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(warnings) != 0 || !resolved.ResponsesKnown || !resolved.ResponsesSupported || resolved.ContextWindow != 128000 || resolved.MaxOutputTokens != 16000 || !resolved.FunctionCalling || resolved.ParallelCalls {
+	if len(warnings) != 0 || !resolved.ResponsesKnown || !resolved.ResponsesSupported || !resolved.MessagesKnown || resolved.MessagesSupported || resolved.ContextWindow != 128000 || resolved.MaxOutputTokens != 16000 || !resolved.FunctionCalling || resolved.ParallelCalls {
 		t.Fatalf("resolved capabilities = %+v warnings=%v", resolved, warnings)
 	}
 	if err := ValidateCodexCompatibility(model, resolved); err != nil {
 		t.Fatalf("Codex compatibility = %v", err)
+	}
+}
+
+func TestResolveModelCapabilitiesUsesClaudeMessagesIdentity(t *testing.T) {
+	model := ModelConfig{BedrockModelID: "global.anthropic.claude-sonnet-4-5-20250929-v1:0", Capabilities: &CapabilityConfig{}}
+	resolved, warnings, err := ResolveModelCapabilities(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || !resolved.MessagesKnown || !resolved.MessagesSupported || resolved.AnthropicModelID != "claude-sonnet-4-5-20250929" || !resolved.FunctionCalling {
+		t.Fatalf("resolved capabilities = %+v warnings=%v", resolved, warnings)
+	}
+	if err := ValidateMessagesTarget(model); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResolveModelCapabilitiesValidatesAnthropicIdentity(t *testing.T) {
+	messages := true
+	complete := CapabilityConfig{
+		MessagesAPI: &messages, AnthropicModelID: "claude-custom-1",
+		ContextWindow: int64Pointer(1000), MaxOutputTokens: int64Pointer(100), InputModalities: []string{"text"},
+		Reasoning: ReasoningCapability{Supported: boolPointer(false)},
+		Tools:     ToolCapability{FunctionCalling: boolPointer(true), ParallelCalls: boolPointer(false)},
+	}
+	if resolved, _, err := ResolveModelCapabilities(ModelConfig{BedrockModelID: "custom", Capabilities: &complete}); err != nil || resolved.AnthropicModelID != "claude-custom-1" {
+		t.Fatalf("resolved=%+v err=%v", resolved, err)
+	}
+	for _, test := range []struct {
+		name string
+		edit func(*CapabilityConfig)
+		want string
+	}{
+		{name: "noncanonical", edit: func(c *CapabilityConfig) { c.AnthropicModelID = "fable" }, want: "beginning with claude-"},
+		{name: "missing messages declaration", edit: func(c *CapabilityConfig) { c.MessagesAPI = nil }, want: "requires messages_api"},
+		{name: "messages disabled", edit: func(c *CapabilityConfig) { disabled := false; c.MessagesAPI = &disabled }, want: "requires messages_api: true"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			value := complete
+			test.edit(&value)
+			if _, _, err := ResolveModelCapabilities(ModelConfig{BedrockModelID: "custom", Capabilities: &value}); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v want=%q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestValidateMessagesTargetRejectsKnownIncompatibleModels(t *testing.T) {
+	if err := ValidateMessagesTarget(ModelConfig{BedrockModelID: "openai.gpt-oss-120b-1:0"}); err == nil || !strings.Contains(err.Error(), "does not support the Messages API") {
+		t.Fatalf("known incompatible error = %v", err)
+	}
+	if err := ValidateMessagesTarget(ModelConfig{BedrockModelID: "unknown-legacy-target"}); err != nil {
+		t.Fatalf("legacy unknown target = %v", err)
+	}
+	if err := ValidateMessagesTarget(ModelConfig{BedrockModelID: "custom-target", Capabilities: &CapabilityConfig{MetadataProfile: "openai.gpt-oss-120b-1:0"}}); err == nil || !strings.Contains(err.Error(), "metadata profile") {
+		t.Fatalf("known incompatible profile error = %v", err)
+	}
+}
+
+func TestValidateClaudeDefaultsReferenceConfiguredModels(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		edit func(*Config)
+		want string
+	}{
+		{name: "unknown default", edit: func(c *Config) { c.Claude.DefaultModel = "missing" }, want: "claude.default_model"},
+		{name: "unknown subagent", edit: func(c *Config) { c.Claude.SubagentModel = "missing" }, want: "claude.subagent_model"},
+		{name: "default whitespace", edit: func(c *Config) { c.Claude.DefaultModel = " coding" }, want: "surrounding whitespace"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := validConfig()
+			test.edit(&cfg)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error=%v want=%q", err, test.want)
+			}
+		})
 	}
 }
 
