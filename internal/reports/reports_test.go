@@ -14,7 +14,7 @@ func TestGenerateAggregatesOnlyTheRequestedWindow(t *testing.T) {
 	start := time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC)
 	writeSession(t, parent, "session-a", []event{
 		{Event: "request", Timestamp: start.Add(time.Hour).Format(time.RFC3339Nano), SessionTag: "nightly", Endpoint: "/v1/chat/completions", LocalModel: "coding", Outcome: "success", InputTokens: int64ptr(10), OutputTokens: int64ptr(20), EstimatedCost: float64ptr(0.03), UsageStatus: "known", CostStatus: "estimated", ClientFamily: "codex", ClientVersion: "0.142.5", MetadataProfile: "profile", MetadataRevision: "r1", CatalogHash: "catalog", ContextUtilization: float64ptr(0.1), OutputUtilization: float64ptr(0.2), FunctionToolCalls: 2},
-		{Event: "request", Timestamp: start.Add(2 * time.Hour).Format(time.RFC3339Nano), SessionTag: "nightly", Endpoint: "/v1/messages", LocalModel: "coding", Outcome: "canceled", UsageStatus: "unknown", CostStatus: "unavailable"},
+		{Event: "request", Timestamp: start.Add(2 * time.Hour).Format(time.RFC3339Nano), SessionTag: "nightly", Endpoint: "/v1/messages", LocalModel: "coding", Outcome: "canceled", UsageStatus: "unknown", CostStatus: "unavailable", ClientFamily: "claude-code", ClientVersion: "2.1.242", SettingsHash: "claude-settings"},
 		{Event: "request", Timestamp: start.Add(3 * time.Hour).Format(time.RFC3339Nano), SessionTag: "nightly", Endpoint: "/v1/models/coding", Outcome: "success"},
 	})
 	writeSession(t, parent, "session-b", []event{
@@ -42,14 +42,14 @@ func TestGenerateAggregatesOnlyTheRequestedWindow(t *testing.T) {
 	if metrics.FunctionToolCalls != 2 || metrics.UnsupportedFeatureRejections != 1 || metrics.AverageContextUtilization != 0.1 || metrics.AverageOutputUtilization != 0.2 {
 		t.Fatalf("compatibility metrics = %+v", metrics)
 	}
-	if len(report.Series) != 2 || len(report.Models) != 2 || len(report.Endpoints) != 3 || len(report.SessionTags) != 2 || len(report.Clients) != 2 || len(report.MetadataProfiles) != 2 || len(report.Catalogs) != 2 {
+	if len(report.Series) != 2 || len(report.Models) != 2 || len(report.Endpoints) != 3 || len(report.SessionTags) != 2 || len(report.Clients) != 3 || len(report.MetadataProfiles) != 2 || len(report.Catalogs) != 2 || len(report.ClaudeSettings) != 2 {
 		t.Fatalf("breakdowns series=%d models=%d endpoints=%d tags=%d", len(report.Series), len(report.Models), len(report.Endpoints), len(report.SessionTags))
 	}
 	html, err := HTML(report)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, text := range []string{"usage report", "Requests over time", "Estimated cost over time", "Model breakdown", "Client compatibility breakdown", "Metadata profile breakdown", "Catalog breakdown", "nightly"} {
+	for _, text := range []string{"usage report", "Requests over time", "Estimated cost over time", "Model breakdown", "Client compatibility breakdown", "Metadata profile breakdown", "Catalog breakdown", "Claude settings breakdown", "claude-settings", "nightly"} {
 		if !strings.Contains(string(html), text) {
 			t.Fatalf("HTML does not contain %q", text)
 		}

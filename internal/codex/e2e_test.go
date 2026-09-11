@@ -70,26 +70,41 @@ func TestCodexOfflineMCPToolLoop(t *testing.T) {
 
 	// The process is confined to a temporary directory and local fakes. Bypass
 	// interactive approvals so a headless test can execute the MCP call.
-	command := exec.CommandContext(ctx, codexCommand, "exec", "--profile", "bedrock-local", "--ephemeral", "--skip-git-repo-check", "--ignore-rules", "--dangerously-bypass-approvals-and-sandbox", "--json", "Use the search MCP exactly once. Search for the diagnostic marker, then report the returned value verbatim.")
-	command.Dir = root
-	command.Env = append(os.Environ(), "CODEX_HOME="+root)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("Codex offline MCP run failed: %v\n%s", err, output)
+	for _, run := range []struct {
+		name  string
+		model string
+	}{{name: "default luna"}, {name: "switch to astra", model: "astra"}} {
+		t.Run(run.name, func(t *testing.T) {
+			args := []string{"exec", "--profile", "bedrock-local"}
+			if run.model != "" {
+				args = append(args, "-m", run.model)
+			}
+			args = append(args, "--ephemeral", "--skip-git-repo-check", "--ignore-rules", "--dangerously-bypass-approvals-and-sandbox", "--json", "Use the search MCP exactly once. Search for the diagnostic marker, then report the returned value verbatim.")
+			command := exec.CommandContext(ctx, codexCommand, args...)
+			command.Dir = root
+			command.Env = append(os.Environ(), "CODEX_HOME="+root)
+			output, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("Codex offline MCP run failed: %v\n%s", err, output)
+			}
+			if !bytes.Contains(output, []byte(fakeSearchResult)) {
+				t.Fatalf("Codex output omitted the MCP result:\n%s", output)
+			}
+			for _, warning := range []string{"missing model metadata", "fallback model metadata", "not found in model catalog"} {
+				if bytes.Contains(bytes.ToLower(output), []byte(warning)) {
+					t.Fatalf("Codex emitted a model metadata warning %q:\n%s", warning, output)
+				}
+			}
+		})
 	}
-	if !bytes.Contains(output, []byte(fakeSearchResult)) {
-		t.Fatalf("Codex output omitted the MCP result:\n%s", output)
-	}
-	for _, warning := range []string{"missing model metadata", "fallback model metadata", "not found in model catalog"} {
-		if bytes.Contains(bytes.ToLower(output), []byte(warning)) {
-			t.Fatalf("Codex emitted a model metadata warning %q:\n%s", warning, output)
-		}
+	if !upstream.RequestContains("fake-bedrock-luna") || !upstream.RequestContains("fake-bedrock-astra") {
+		t.Fatalf("model selection did not reach both fake targets: %s", upstream.RequestSummary())
 	}
 	if marker, err := os.ReadFile(markerPath); err != nil || strings.TrimSpace(string(marker)) != fakeSearchResult {
 		t.Fatalf("fake MCP was not called correctly: marker=%q err=%v requests=%s", marker, err, upstream.RequestSummary())
 	}
-	if calls := upstream.Calls(); calls < 2 {
-		t.Fatalf("proxy received %d upstream calls, want tool call and continuation", calls)
+	if calls := upstream.Calls(); calls < 4 {
+		t.Fatalf("proxy received %d upstream calls, want two tool calls and continuations", calls)
 	}
 	if !upstream.ContinuationContains(fakeSearchResult) {
 		t.Fatal("Codex continuation omitted the MCP result")
@@ -159,6 +174,17 @@ func (f *codexResponsesFake) ContinuationContains(value string) bool {
 	return false
 }
 
+func (f *codexResponsesFake) RequestContains(value string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, body := range f.bodies {
+		if bytes.Contains(body, []byte(value)) {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *codexResponsesFake) RequestSummary() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -201,10 +227,9 @@ func (f *codexResponsesFake) Do(_ context.Context, request *http.Request) (*http
 	}
 	f.mu.Lock()
 	f.calls++
-	callNumber := f.calls
 	f.bodies = append(f.bodies, bytes.Clone(body))
 	f.mu.Unlock()
-	if callNumber > 1 {
+	if bytes.Contains(body, []byte(fakeSearchResult)) {
 		return eventStreamResponse(finalResponseEvents()), nil
 	}
 	var payload struct {
@@ -288,10 +313,14 @@ func usage(input, output int) map[string]any {
 
 func integrationConfig(listen string) config.Config {
 	contextWindow, maxOutput := int64(200000), int64(64000)
-	responses, reasoning, functions, parallel := true, false, true, true
+	responses, reasoning, functions, parallel := true, true, true, true
 	maxTokens := 8192
-	return config.Config{Version: 1, AWS: config.AWSConfig{Profile: "must-not-load", Region: "us-east-2"}, Listen: listen, Models: map[string]config.ModelConfig{"coding": {
-		DisplayName: "Offline MCP target", BedrockModelID: "fake-bedrock-target", MaxTokens: &maxTokens,
-		Capabilities: &config.CapabilityConfig{ResponsesAPI: &responses, ContextWindow: &contextWindow, MaxOutputTokens: &maxOutput, InputModalities: []string{"text"}, Reasoning: config.ReasoningCapability{Supported: &reasoning}, Tools: config.ToolCapability{FunctionCalling: &functions, ParallelCalls: &parallel}},
-	}}}
+	model := config.ModelConfig{
+		DisplayName: "Offline MCP target", BedrockModelID: "fake-bedrock-luna", MaxTokens: &maxTokens,
+		Capabilities: &config.CapabilityConfig{ResponsesAPI: &responses, ContextWindow: &contextWindow, MaxOutputTokens: &maxOutput, InputModalities: []string{"text"}, Reasoning: config.ReasoningCapability{Supported: &reasoning, Efforts: []string{"low", "medium", "high"}}, Tools: config.ToolCapability{FunctionCalling: &functions, ParallelCalls: &parallel}},
+	}
+	astra := model
+	astra.DisplayName = "Offline alternate target"
+	astra.BedrockModelID = "fake-bedrock-astra"
+	return config.Config{Version: 1, AWS: config.AWSConfig{Profile: "must-not-load", Region: "us-east-2"}, Listen: listen, Codex: config.CodexConfig{DefaultModel: "luna"}, Models: map[string]config.ModelConfig{"luna": model, "astra": astra}}
 }

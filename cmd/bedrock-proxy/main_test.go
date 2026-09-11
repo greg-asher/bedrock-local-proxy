@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -19,12 +21,44 @@ import (
 
 type mainCodexRunner struct{}
 
+type mainClaudeRunner struct{}
+
+func (mainClaudeRunner) Run(_ context.Context, _ string, args ...string) ([]byte, []byte, error) {
+	if len(args) == 1 && args[0] == "--version" {
+		return []byte("2.1.242 (Claude Code)"), nil, nil
+	}
+	if len(args) == 3 && args[0] == "--settings" && args[2] == "--version" {
+		if _, err := os.ReadFile(args[1]); err != nil {
+			return nil, nil, err
+		}
+		return []byte("2.1.242 (Claude Code)"), nil, nil
+	}
+	return nil, []byte("unexpected arguments"), errors.New("unexpected arguments")
+}
+
 func (mainCodexRunner) Run(_ context.Context, _ string, args ...string) ([]byte, []byte, error) {
 	if len(args) == 1 && args[0] == "--version" {
 		return []byte("codex-cli 0.142.5"), nil, nil
 	}
 	if len(args) >= 3 && args[0] == "debug" && args[1] == "models" && args[2] == "-c" {
-		return []byte(`{"models":[{"slug":"coding"}]}`), nil, nil
+		path, err := strconv.Unquote(strings.TrimPrefix(args[3], "model_catalog_json="))
+		if err != nil {
+			return nil, nil, err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		var document struct {
+			Models []struct {
+				Slug string `json:"slug"`
+			} `json:"models"`
+		}
+		if err := json.Unmarshal(data, &document); err != nil {
+			return nil, nil, err
+		}
+		encoded, err := json.Marshal(document)
+		return encoded, nil, err
 	}
 	return []byte(`{"models":[{"slug":"bundled","base_instructions":"You are Codex, a coding agent based on GPT.\nFollow instructions.","model_messages":{"instructions_template":"You are Codex, a coding agent based on GPT.\nFollow instructions.","instructions_variables":{"personality_default":""}}}]}`), nil, nil
 }
@@ -35,7 +69,7 @@ func TestConfigureCodexCommandWritesCatalogAndPrintsProfile(t *testing.T) {
 	t.Cleanup(func() { codexCommandRunner = oldRunner })
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.yaml")
-	configText := "version: 1\naws:\n  profile: offline\n  region: us-east-2\nmodels:\n  coding:\n    bedrock_model_id: custom\n    capabilities:\n      responses_api: true\n      context_window: 1000\n      max_output_tokens: 128\n      input_modalities: [text]\n      reasoning:\n        supported: false\n      tools:\n        function_calling: true\n        parallel_calls: false\n"
+	configText := "version: 1\naws:\n  profile: offline\n  region: us-east-2\ncodex:\n  default_model: coding\nmodels:\n  coding:\n    bedrock_model_id: custom\n    capabilities:\n      responses_api: true\n      context_window: 1000\n      max_output_tokens: 128\n      input_modalities: [text]\n      reasoning:\n        supported: false\n      tools:\n        function_calling: true\n        parallel_calls: false\n  second:\n    bedrock_model_id: custom-second\n    capabilities:\n      responses_api: true\n      context_window: 2000\n      max_output_tokens: 256\n      input_modalities: [text]\n      reasoning:\n        supported: false\n      tools:\n        function_calling: true\n        parallel_calls: false\n  fable:\n    bedrock_model_id: messages-only\n"
 	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -47,14 +81,54 @@ func TestConfigureCodexCommandWritesCatalogAndPrintsProfile(t *testing.T) {
 	if _, err := os.Stat(catalogPath); err != nil {
 		t.Fatal(err)
 	}
-	for _, wanted := range []string{"Codex version: 0.142.5", "model = \"coding\"", "wire_api = \"responses\"", "features.apps = false", "supports_standalone_web_search = false", "X-Bedrock-Proxy-Catalog"} {
+	for _, wanted := range []string{"Codex version: 0.142.5", "Default model: coding", "Catalog models: coding, second", "Skipped models:", "fable: capabilities are required", "model = \"coding\"", "wire_api = \"responses\"", "features.apps = false", "supports_standalone_web_search = false", "X-Bedrock-Proxy-Catalog"} {
 		if !strings.Contains(stdout.String(), wanted) {
 			t.Fatalf("output missing %q: %s", wanted, stdout.String())
 		}
 	}
 	metadata, aliases, err := codex.Inspect(catalogPath)
-	if err != nil || len(aliases) != 1 || aliases[0] != "coding" || metadata.CatalogHash == "" {
+	if err != nil || len(aliases) != 2 || aliases[0] != "coding" || aliases[1] != "second" || metadata.CatalogHash == "" {
 		t.Fatalf("catalog metadata=%+v aliases=%v err=%v", metadata, aliases, err)
+	}
+}
+
+func TestConfigureClaudeCommandWritesMultiModelSettings(t *testing.T) {
+	oldRunner := claudeCommandRunner
+	claudeCommandRunner = mainClaudeRunner{}
+	t.Cleanup(func() { claudeCommandRunner = oldRunner })
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yaml")
+	configText := "version: 1\naws:\n  profile: offline\n  region: us-east-2\nclaude:\n  default_model: fable\n  subagent_model: sonnet\nmodels:\n  fable:\n    display_name: Fable\n    bedrock_model_id: custom-fable\n    capabilities:\n      messages_api: true\n      anthropic_model_id: claude-fable-5\n      context_window: 200000\n      max_output_tokens: 64000\n      input_modalities: [text, image]\n      reasoning:\n        supported: true\n        efforts: [low, medium, high]\n      tools:\n        function_calling: true\n        parallel_calls: true\n  sonnet:\n    display_name: Sonnet\n    bedrock_model_id: custom-sonnet\n    capabilities:\n      messages_api: true\n      anthropic_model_id: claude-sonnet-5\n      context_window: 200000\n      max_output_tokens: 64000\n      input_modalities: [text, image]\n      reasoning:\n        supported: true\n        efforts: [low, medium, high]\n      tools:\n        function_calling: true\n        parallel_calls: true\n  responses-only:\n    bedrock_model_id: custom-responses\n"
+	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(root, "claude", "settings.json")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"configure", "claude", "--config", configPath, "--settings", settingsPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, wanted := range []string{`"model": "claude-fable-5"`, `"claude-fable-5": "fable"`, `"claude-sonnet-5": "sonnet"`, `"replaceBuiltInOptions": true`} {
+		if !strings.Contains(string(data), wanted) {
+			t.Fatalf("settings missing %q: %s", wanted, data)
+		}
+	}
+	for _, wanted := range []string{"Claude version: 2.1.242", "Default model: fable", "Subagent model: sonnet", "Picker models: fable, sonnet", "Skipped models:", "responses-only: capabilities are required", "claude --settings " + settingsPath} {
+		if !strings.Contains(stdout.String(), wanted) {
+			t.Fatalf("output missing %q: %s", wanted, stdout.String())
+		}
+	}
+}
+
+func TestShellQuoteProtectsGeneratedLaunchPath(t *testing.T) {
+	if got := shellQuote("/tmp/normal-path.json"); got != "/tmp/normal-path.json" {
+		t.Fatalf("safe path = %q", got)
+	}
+	if got := shellQuote("/tmp/user's $settings.json"); got != `'/tmp/user'"'"'s $settings.json'` {
+		t.Fatalf("quoted path = %q", got)
 	}
 }
 

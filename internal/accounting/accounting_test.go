@@ -28,7 +28,7 @@ func TestJSONRecordsAndSummaryUseRealCompletionMetadata(t *testing.T) {
 		Endpoint: "/v1/responses", LocalModel: "coding", UpstreamModel: "provider/model",
 		Elapsed: 12 * time.Millisecond, HTTPStatus: &status, Outcome: server.CompletionSucceeded,
 		InputTokens: &inTokens, OutputTokens: &outTokens,
-		ClientFamily: "codex", ClientVersion: "0.142.5", MetadataProfile: "profile", MetadataRevision: "r1", CatalogHash: "hash",
+		ClientFamily: "codex", ClientVersion: "0.142.5", MetadataProfile: "profile", MetadataRevision: "r1", CatalogHash: "hash", SettingsHash: "settings-hash",
 		ContextWindow: 1000, MaxOutputTokens: 100, FunctionToolCalls: 2, UnsupportedFeatureRejections: 1,
 	})
 	recorder.Record(server.CompletionResult{
@@ -57,11 +57,12 @@ func TestJSONRecordsAndSummaryUseRealCompletionMetadata(t *testing.T) {
 		ContextUtilization *float64 `json:"context_utilization"`
 		OutputUtilization  *float64 `json:"output_utilization"`
 		FunctionToolCalls  int      `json:"function_tool_calls"`
+		SettingsHash       string   `json:"settings_hash"`
 	}
 	if err := json.Unmarshal([]byte(lines[0]), &request); err != nil {
 		t.Fatal(err)
 	}
-	if request.EstimatedCost == nil || *request.EstimatedCost != 0.00035 || request.InputTokens == nil || *request.InputTokens != 100 || request.ClientFamily != "codex" || request.ContextUtilization == nil || *request.ContextUtilization != 0.15 || request.OutputUtilization == nil || *request.OutputUtilization != 0.5 || request.FunctionToolCalls != 2 {
+	if request.EstimatedCost == nil || *request.EstimatedCost != 0.00035 || request.InputTokens == nil || *request.InputTokens != 100 || request.ClientFamily != "codex" || request.SettingsHash != "settings-hash" || request.ContextUtilization == nil || *request.ContextUtilization != 0.15 || request.OutputUtilization == nil || *request.OutputUtilization != 0.5 || request.FunctionToolCalls != 2 {
 		t.Fatalf("successful request metadata = %+v", request)
 	}
 	var summary summaryRecord

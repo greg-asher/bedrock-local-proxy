@@ -54,6 +54,7 @@ type CompletionResult struct {
 	MetadataProfile                string
 	MetadataRevision               string
 	CatalogHash                    string
+	SettingsHash                   string
 }
 
 const maxUsageObservationBytes = 1 << 20

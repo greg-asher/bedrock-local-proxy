@@ -12,8 +12,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gregasher/bedrock-local-proxy/internal/config"
 	"github.com/gregasher/bedrock-local-proxy/internal/transport"
 )
+
+type messagesValidationError struct {
+	message     string
+	unsupported bool
+}
+
+func (e *messagesValidationError) Error() string { return e.message }
 
 // serveMessages relays the native Bedrock Anthropic Messages protocol. The
 // body is intentionally treated as an envelope of raw JSON values: system
@@ -25,7 +33,9 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Allow", http.MethodPost)
 		status := http.StatusMethodNotAllowed
 		w.WriteHeader(status)
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/messages", HTTPStatus: &status, Outcome: CompletionFailed})
+		result := s.messagesCompletionMetadata(r, "")
+		result.Endpoint, result.HTTPStatus, result.Outcome = "/v1/messages", &status, CompletionFailed
+		s.finishCompletion(started, result)
 		return
 	}
 
@@ -33,23 +43,18 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		status := http.StatusBadRequest
 		s.writeAnthropicError(w, status, err.Error(), "invalid_request_error")
-		s.finishCompletion(started, CompletionResult{
-			Endpoint:   "/v1/messages",
-			HTTPStatus: &status,
-			LocalModel: localModel,
-			Outcome:    CompletionFailed,
-		})
+		result := s.messagesFailureResult(r, localModel, status, CompletionFailed)
+		var validation *messagesValidationError
+		if errors.As(err, &validation) && validation.unsupported {
+			result.UnsupportedFeatureRejections = 1
+		}
+		s.finishCompletion(started, result)
 		return
 	}
 	if s.transport == nil {
 		status := http.StatusBadGateway
 		s.writeAnthropicError(w, status, "AWS transport is not configured", "api_error")
-		s.finishCompletion(started, CompletionResult{
-			Endpoint:   "/v1/messages",
-			HTTPStatus: &status,
-			LocalModel: localModel,
-			Outcome:    CompletionFailed,
-		})
+		s.finishCompletion(started, s.messagesFailureResult(r, localModel, status, CompletionFailed))
 		return
 	}
 
@@ -57,11 +62,12 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		status := http.StatusBadGateway
 		s.writeAnthropicError(w, status, "could not create upstream request", "api_error")
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/messages", LocalModel: localModel, HTTPStatus: &status, Outcome: CompletionFailed})
+		s.finishCompletion(started, s.messagesFailureResult(r, localModel, status, CompletionFailed))
 		return
 	}
 	upstreamRequest.Header = r.Header.Clone()
 	upstreamRequest.Header.Set("Content-Type", "application/json")
+	upstreamRequest.Header.Del("X-Bedrock-Proxy-Claude-Settings")
 
 	response, err := s.transport.Do(r.Context(), upstreamRequest)
 	if err != nil {
@@ -71,25 +77,13 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, context.Canceled) || transport.ClassOf(err) == transport.FailureCanceled {
 			outcome = CompletionCanceled
 		}
-		s.finishCompletion(started, CompletionResult{
-			Endpoint:      "/v1/messages",
-			LocalModel:    localModel,
-			UpstreamModel: configuredTarget(s.cfg, localModel),
-			HTTPStatus:    &status,
-			Outcome:       outcome,
-		})
+		s.finishCompletion(started, s.messagesFailureResult(r, localModel, status, outcome))
 		return
 	}
 	if response == nil {
 		status := http.StatusBadGateway
 		s.writeAnthropicError(w, status, "AWS upstream returned no response", "api_error")
-		s.finishCompletion(started, CompletionResult{
-			Endpoint:      "/v1/messages",
-			LocalModel:    localModel,
-			UpstreamModel: configuredTarget(s.cfg, localModel),
-			HTTPStatus:    &status,
-			Outcome:       CompletionFailed,
-		})
+		s.finishCompletion(started, s.messagesFailureResult(r, localModel, status, CompletionFailed))
 		return
 	}
 	body := response.Body
@@ -107,13 +101,7 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	observed, copyErr := relayAndObserve(w, body, maxUsageObservationBytes)
 	status := response.StatusCode
-	result := CompletionResult{
-		Endpoint:      "/v1/messages",
-		LocalModel:    localModel,
-		UpstreamModel: configuredTarget(s.cfg, localModel),
-		HTTPStatus:    &status,
-		Outcome:       CompletionFailed,
-	}
+	result := s.messagesFailureResult(r, localModel, status, CompletionFailed)
 	if copyErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
 		result.Outcome = CompletionSucceeded
 	}
@@ -122,6 +110,7 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	if observed != nil {
 		result.InputTokens, result.OutputTokens, result.ObservedUncoveredBillingFields = parseMessagesUsage(observed)
+		result.FunctionToolCalls = countMessageToolCalls(observed)
 	}
 	s.finishCompletion(started, result)
 }
@@ -153,6 +142,9 @@ func (s *Server) transformMessagesRequest(r *http.Request) (string, []byte, bool
 	if !ok {
 		return localModel, nil, false, fmt.Errorf("unknown model %q; configured models: %s", localModel, configuredModels(s.cfg))
 	}
+	if err := config.ValidateMessagesTarget(model); err != nil {
+		return localModel, nil, false, &messagesValidationError{message: err.Error(), unsupported: true}
+	}
 
 	var stream bool
 	if raw, ok := fields["stream"]; ok {
@@ -169,6 +161,17 @@ func (s *Server) transformMessagesRequest(r *http.Request) (string, []byte, bool
 	if model.MaxTokens != nil {
 		if _, exists := fields["max_tokens"]; !exists {
 			fields["max_tokens"] = json.RawMessage(strconv.Itoa(*model.MaxTokens))
+		}
+	}
+	if raw, exists := fields["max_tokens"]; exists {
+		var limit int64
+		if err := json.Unmarshal(raw, &limit); err != nil || limit <= 0 {
+			return localModel, nil, stream, &messagesValidationError{message: "max_tokens must be a positive integer"}
+		}
+		if model.Capabilities != nil {
+			if capabilities, _, err := config.ResolveModelCapabilities(model); err == nil && capabilities.MaxOutputTokens > 0 && limit > capabilities.MaxOutputTokens {
+				return localModel, nil, stream, &messagesValidationError{message: fmt.Sprintf("max_tokens %d exceeds the configured model ceiling %d", limit, capabilities.MaxOutputTokens), unsupported: true}
+			}
 		}
 	}
 	transformed, err := json.Marshal(fields)
@@ -251,6 +254,7 @@ type messagesStreamObserver struct {
 	usageInvalid bool
 	sawStop      bool
 	sawError     bool
+	toolCalls    int
 }
 
 func (o *messagesStreamObserver) observe(event sseEvent) {
@@ -274,6 +278,15 @@ func (o *messagesStreamObserver) observe(event sseEvent) {
 		return
 	}
 	switch envelope.Type {
+	case "content_block_start":
+		var block struct {
+			ContentBlock struct {
+				Type string `json:"type"`
+			} `json:"content_block"`
+		}
+		if json.Unmarshal(data, &block) == nil && block.ContentBlock.Type == "tool_use" {
+			o.toolCalls++
+		}
 	case "message_start":
 		if envelope.Message != nil {
 			o.observeUsage(envelope.Message.Usage)
@@ -328,13 +341,8 @@ func (s *Server) serveMessagesStream(w http.ResponseWriter, r *http.Request, sta
 	observer := &messagesStreamObserver{}
 	copyErr := relayAndObserveStream(w, flush, body, maxUsageObservationBytes, observer.observe)
 	status := response.StatusCode
-	result := CompletionResult{
-		Endpoint:      "/v1/messages",
-		LocalModel:    localModel,
-		UpstreamModel: configuredTarget(s.cfg, localModel),
-		HTTPStatus:    &status,
-		Outcome:       CompletionFailed,
-	}
+	result := s.messagesFailureResult(r, localModel, status, CompletionFailed)
+	result.FunctionToolCalls = observer.toolCalls
 	if !observer.usageInvalid {
 		result.InputTokens = observer.inputTokens
 		result.OutputTokens = observer.outputTokens
@@ -348,4 +356,46 @@ func (s *Server) serveMessagesStream(w http.ResponseWriter, r *http.Request, sta
 		result.Outcome = CompletionCanceled
 	}
 	s.finishCompletion(started, result)
+}
+
+func (s *Server) messagesCompletionMetadata(r *http.Request, alias string) CompletionResult {
+	result := CompletionResult{SettingsHash: normalizedCatalogHash(r.Header.Get("X-Bedrock-Proxy-Claude-Settings"))}
+	result.ClientFamily, result.ClientVersion = normalizedClient(r.UserAgent())
+	if model, ok := s.cfg.Models[alias]; ok && model.Capabilities != nil {
+		if capabilities, _, err := config.ResolveModelCapabilities(model); err == nil {
+			result.ContextWindow = capabilities.ContextWindow
+			result.MaxOutputTokens = capabilities.MaxOutputTokens
+			result.MetadataProfile = capabilities.MetadataProfile
+			result.MetadataRevision = capabilities.MetadataRevision
+		}
+	}
+	return result
+}
+
+func (s *Server) messagesFailureResult(r *http.Request, alias string, status int, outcome CompletionOutcome) CompletionResult {
+	result := s.messagesCompletionMetadata(r, alias)
+	result.Endpoint = "/v1/messages"
+	result.LocalModel = alias
+	result.UpstreamModel = configuredTarget(s.cfg, alias)
+	result.HTTPStatus = &status
+	result.Outcome = outcome
+	return result
+}
+
+func countMessageToolCalls(body []byte) int {
+	var response struct {
+		Content []struct {
+			Type string `json:"type"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(body, &response) != nil {
+		return 0
+	}
+	count := 0
+	for _, block := range response.Content {
+		if block.Type == "tool_use" {
+			count++
+		}
+	}
+	return count
 }

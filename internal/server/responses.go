@@ -355,6 +355,7 @@ func mergeCompletionMetadata(target *CompletionResult, source CompletionResult) 
 	target.ContextWindow, target.MaxOutputTokens = source.ContextWindow, source.MaxOutputTokens
 	target.MetadataProfile, target.MetadataRevision = source.MetadataProfile, source.MetadataRevision
 	target.CatalogHash = source.CatalogHash
+	target.SettingsHash = source.SettingsHash
 }
 
 func normalizedClient(userAgent string) (string, string) {

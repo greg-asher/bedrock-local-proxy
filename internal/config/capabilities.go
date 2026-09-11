@@ -11,13 +11,15 @@ import (
 // metadata profile can supply them without making false indistinguishable
 // from unspecified.
 type CapabilityConfig struct {
-	MetadataProfile string              `yaml:"metadata_profile,omitempty"`
-	ResponsesAPI    *bool               `yaml:"responses_api,omitempty"`
-	ContextWindow   *int64              `yaml:"context_window,omitempty"`
-	MaxOutputTokens *int64              `yaml:"max_output_tokens,omitempty"`
-	InputModalities []string            `yaml:"input_modalities,omitempty"`
-	Reasoning       ReasoningCapability `yaml:"reasoning,omitempty"`
-	Tools           ToolCapability      `yaml:"tools,omitempty"`
+	MetadataProfile  string              `yaml:"metadata_profile,omitempty"`
+	ResponsesAPI     *bool               `yaml:"responses_api,omitempty"`
+	MessagesAPI      *bool               `yaml:"messages_api,omitempty"`
+	AnthropicModelID string              `yaml:"anthropic_model_id,omitempty"`
+	ContextWindow    *int64              `yaml:"context_window,omitempty"`
+	MaxOutputTokens  *int64              `yaml:"max_output_tokens,omitempty"`
+	InputModalities  []string            `yaml:"input_modalities,omitempty"`
+	Reasoning        ReasoningCapability `yaml:"reasoning,omitempty"`
+	Tools            ToolCapability      `yaml:"tools,omitempty"`
 }
 
 type ReasoningCapability struct {
@@ -40,6 +42,9 @@ type ResolvedCapabilities struct {
 	MetadataVerifiedAt string
 	ResponsesSupported bool
 	ResponsesKnown     bool
+	MessagesSupported  bool
+	MessagesKnown      bool
+	AnthropicModelID   string
 	ContextWindow      int64
 	MaxOutputTokens    int64
 	InputModalities    []string
@@ -66,6 +71,9 @@ var capabilityProfiles = map[string]capabilityProfile{
 			MetadataVerifiedAt: "2026-09-11",
 			ResponsesSupported: false,
 			ResponsesKnown:     true,
+			MessagesSupported:  true,
+			MessagesKnown:      true,
+			AnthropicModelID:   "claude-sonnet-4-5-20250929",
 			ContextWindow:      200000,
 			MaxOutputTokens:    64000,
 			InputModalities:    []string{"text", "image"},
@@ -94,6 +102,8 @@ var capabilityProfiles = map[string]capabilityProfile{
 			MetadataVerifiedAt: "2026-09-11",
 			ResponsesSupported: true,
 			ResponsesKnown:     true,
+			MessagesSupported:  false,
+			MessagesKnown:      true,
 			ContextWindow:      128000,
 			MaxOutputTokens:    16000,
 			InputModalities:    []string{"text"},
@@ -114,6 +124,8 @@ var capabilityProfiles = map[string]capabilityProfile{
 			MetadataVerifiedAt: "2026-09-11",
 			ResponsesSupported: true,
 			ResponsesKnown:     true,
+			MessagesSupported:  false,
+			MessagesKnown:      true,
 			ContextWindow:      128000,
 			MaxOutputTokens:    16000,
 			InputModalities:    []string{"text"},
@@ -137,7 +149,7 @@ var allowedReasoningEfforts = map[string]struct{}{
 // exact model-ID match. It never performs fuzzy model-name inference.
 func ResolveModelCapabilities(model ModelConfig) (ResolvedCapabilities, []string, error) {
 	if model.Capabilities == nil {
-		return ResolvedCapabilities{}, nil, fmt.Errorf("capabilities are required for Codex metadata")
+		return ResolvedCapabilities{}, nil, fmt.Errorf("capabilities are required for client metadata")
 	}
 	cfg := model.Capabilities
 	var resolved ResolvedCapabilities
@@ -166,6 +178,26 @@ func ResolveModelCapabilities(model ModelConfig) (ResolvedCapabilities, []string
 		}
 		resolved.ResponsesSupported = *cfg.ResponsesAPI
 		resolved.ResponsesKnown = true
+	}
+	if cfg.MessagesAPI != nil {
+		if hasProfile && profile.MessagesKnown && *cfg.MessagesAPI && !profile.MessagesSupported {
+			return ResolvedCapabilities{}, warnings, fmt.Errorf("messages_api cannot enable the Messages API for metadata profile %q because the documented Bedrock Runtime API does not support it", profile.MetadataProfile)
+		}
+		resolved.MessagesSupported = *cfg.MessagesAPI
+		resolved.MessagesKnown = true
+	}
+	if cfg.AnthropicModelID != "" {
+		value := strings.TrimSpace(cfg.AnthropicModelID)
+		if value != cfg.AnthropicModelID {
+			return ResolvedCapabilities{}, warnings, fmt.Errorf("anthropic_model_id must not have surrounding whitespace")
+		}
+		if !strings.HasPrefix(value, "claude-") {
+			return ResolvedCapabilities{}, warnings, fmt.Errorf("anthropic_model_id must be an exact canonical Anthropic model ID beginning with claude-")
+		}
+		if hasProfile && profile.AnthropicModelID != "" && value != profile.AnthropicModelID {
+			return ResolvedCapabilities{}, warnings, fmt.Errorf("anthropic_model_id %q conflicts with metadata profile identity %q", value, profile.AnthropicModelID)
+		}
+		resolved.AnthropicModelID = value
 	}
 	if cfg.ContextWindow != nil {
 		if hasProfile && *cfg.ContextWindow > profile.ContextWindow {
@@ -227,6 +259,12 @@ func ResolveModelCapabilities(model ModelConfig) (ResolvedCapabilities, []string
 	if resolved.ParallelCalls && !resolved.FunctionCalling {
 		return ResolvedCapabilities{}, warnings, fmt.Errorf("tools.parallel_calls requires tools.function_calling: true")
 	}
+	if resolved.AnthropicModelID != "" && !resolved.MessagesKnown {
+		return ResolvedCapabilities{}, warnings, fmt.Errorf("anthropic_model_id requires messages_api")
+	}
+	if !resolved.MessagesSupported && resolved.AnthropicModelID != "" {
+		return ResolvedCapabilities{}, warnings, fmt.Errorf("anthropic_model_id requires messages_api: true")
+	}
 	if !hasProfile {
 		missing := make([]string, 0, 6)
 		if cfg.ContextWindow == nil {
@@ -279,6 +317,24 @@ func ValidateCodexCompatibility(model ModelConfig, resolved ResolvedCapabilities
 func ValidateResponsesTarget(model ModelConfig) error {
 	if profile, ok := profileForExactModelID(strings.TrimSpace(model.BedrockModelID)); ok && profile.ResponsesKnown && !profile.ResponsesSupported {
 		return fmt.Errorf("bedrock_model_id %q does not support the Responses API on bedrock-runtime", model.BedrockModelID)
+	}
+	return nil
+}
+
+// ValidateMessagesTarget rejects exact targets whose authoritative bundled
+// profile documents that bedrock-runtime cannot serve the Messages API.
+// Unknown targets remain usable by legacy/manual configurations.
+func ValidateMessagesTarget(model ModelConfig) error {
+	if profile, ok := profileForExactModelID(strings.TrimSpace(model.BedrockModelID)); ok && profile.MessagesKnown && !profile.MessagesSupported {
+		return fmt.Errorf("bedrock_model_id %q does not support the Messages API on bedrock-runtime", model.BedrockModelID)
+	}
+	if model.Capabilities != nil && model.Capabilities.MessagesAPI != nil && !*model.Capabilities.MessagesAPI {
+		return fmt.Errorf("configured target does not support the Messages API on bedrock-runtime")
+	}
+	if model.Capabilities != nil {
+		if resolved, _, err := ResolveModelCapabilities(model); err == nil && resolved.MessagesKnown && !resolved.MessagesSupported {
+			return fmt.Errorf("configured metadata profile %q does not support the Messages API on bedrock-runtime", resolved.MetadataProfile)
+		}
 	}
 	return nil
 }

@@ -42,7 +42,7 @@ func TestSessionReporterWritesPrivateSafeReport(t *testing.T) {
 	status := 200
 	input, output := int64(3), int64(4)
 	recorder.Record(server.CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: "coding", UpstreamModel: "anthropic.claude-test", HTTPStatus: &status, Outcome: server.CompletionSucceeded, InputTokens: &input, OutputTokens: &output, ClientFamily: "codex", ClientVersion: "0.142.5", MetadataProfile: "test-profile", MetadataRevision: "r1", CatalogHash: strings.Repeat("a", 64), ContextWindow: 100, MaxOutputTokens: 20, FunctionToolCalls: 1})
-	recorder.Record(server.CompletionResult{Endpoint: "/v1/messages", LocalModel: "coding", Outcome: server.CompletionCanceled})
+	recorder.Record(server.CompletionResult{Endpoint: "/v1/messages", LocalModel: "coding", Outcome: server.CompletionCanceled, ClientFamily: "claude-code", ClientVersion: "2.1.242", SettingsHash: strings.Repeat("b", 64)})
 	recorder.Record(server.CompletionResult{Endpoint: "/v1/models", HTTPStatus: &status, Outcome: server.CompletionSucceeded})
 	recorder.WriteSummary()
 	reporter.Finalize(SessionCompleted)
@@ -99,7 +99,7 @@ func TestSessionReporterWritesPrivateSafeReport(t *testing.T) {
 		}
 	}
 	all := string(data)
-	if !strings.Contains(all, `"client_family":"codex"`) || !strings.Contains(all, `"catalog_hash":"`+strings.Repeat("a", 64)+`"`) || !strings.Contains(all, `"function_tool_calls":1`) {
+	if !strings.Contains(all, `"client_family":"codex"`) || !strings.Contains(all, `"catalog_hash":"`+strings.Repeat("a", 64)+`"`) || !strings.Contains(all, `"client_family":"claude-code"`) || !strings.Contains(all, `"settings_hash":"`+strings.Repeat("b", 64)+`"`) || !strings.Contains(all, `"function_tool_calls":1`) {
 		t.Fatalf("report omitted safe compatibility metadata: %s", all)
 	}
 	for _, sentinel := range []string{"prompt-secret", "completion-secret", "tool-secret", "credential-secret", "header-secret", "raw-upstream-error"} {

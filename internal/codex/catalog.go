@@ -53,12 +53,30 @@ type GenerateOptions struct {
 type GenerateResult struct {
 	CatalogPath        string
 	ModelAlias         string
+	ModelAliases       []string
+	SkippedModels      []SkippedModel
 	CodexVersion       string
 	BundledCatalogHash string
 	MetadataRevision   string
 	CatalogHash        string
 	Warnings           []string
 	TOML               string
+}
+
+type SkippedModel struct {
+	Alias  string
+	Reason string
+}
+
+// CatalogModels is the complete deterministic set of proxy aliases that may
+// be advertised to Codex, plus the effective profile default.
+type CatalogModels struct {
+	DefaultAlias string
+	Aliases      []string
+	Models       map[string]config.ModelConfig
+	Capabilities map[string]config.ResolvedCapabilities
+	Warnings     []string
+	Skipped      []SkippedModel
 }
 
 type catalogDocument struct {
@@ -139,16 +157,10 @@ type catalogIdentity struct {
 }
 
 func Generate(ctx context.Context, options GenerateOptions) (GenerateResult, error) {
-	alias, model, err := selectModel(options.Config.Models, options.ModelAlias)
-	if err != nil {
+	// Resolve version-independent metadata first so configuration mistakes are
+	// reported even when the local Codex installation is missing or malformed.
+	if _, err := ResolveCatalogModels(options.Config, options.ModelAlias); err != nil {
 		return GenerateResult{}, err
-	}
-	capabilities, warnings, err := config.ResolveModelCapabilities(model)
-	if err != nil {
-		return GenerateResult{}, fmt.Errorf("resolve capabilities for model %q: %w", alias, err)
-	}
-	if err := config.ValidateCodexCompatibility(model, capabilities); err != nil {
-		return GenerateResult{}, fmt.Errorf("model %q is not Codex-compatible: %w", alias, err)
 	}
 	runner := options.Runner
 	if runner == nil {
@@ -166,6 +178,13 @@ func Generate(ctx context.Context, options GenerateOptions) (GenerateResult, err
 	if codexVersion == "" {
 		return GenerateResult{}, fmt.Errorf("read Codex version: unexpected output %q", strings.TrimSpace(string(versionOut)))
 	}
+	resolved, err := ResolveCatalogModelsForVersion(options.Config, options.ModelAlias, codexVersion)
+	if err != nil {
+		return GenerateResult{}, err
+	}
+	alias := resolved.DefaultAlias
+	capabilities := resolved.Capabilities[alias]
+	warnings := append([]string(nil), resolved.Warnings...)
 	bundled, bundledErr, err := runner.Run(ctx, command, "debug", "models", "--bundled")
 	if err != nil {
 		return GenerateResult{}, commandError("read bundled Codex model catalog", err, bundledErr)
@@ -184,24 +203,38 @@ func Generate(ctx context.Context, options GenerateOptions) (GenerateResult, err
 	if err != nil {
 		return GenerateResult{}, fmt.Errorf("index bundled Codex model catalog: %w", err)
 	}
-	if _, conflict := bundledModels[alias]; conflict {
-		return GenerateResult{}, fmt.Errorf("local model alias %q conflicts with a bundled Codex model; choose a distinct alias", alias)
+	for _, localAlias := range resolved.Aliases {
+		if _, conflict := bundledModels[localAlias]; conflict {
+			return GenerateResult{}, fmt.Errorf("local model alias %q conflicts with a bundled Codex model; choose a distinct alias", localAlias)
+		}
 	}
 	outputLimitVisible := catalogHasField(source.Models, "max_output_tokens")
 	instructions, modelMessages, err := providerNeutralInstructions(source.Models)
 	if err != nil {
 		return GenerateResult{}, err
 	}
-	entry := newCatalogModel(alias, model, capabilities, instructions, modelMessages)
-	encodedEntry, err := json.Marshal(entry)
-	if err != nil {
-		return GenerateResult{}, fmt.Errorf("encode Codex model metadata: %w", err)
+	models := make([]json.RawMessage, 0, len(source.Models)+len(resolved.Aliases))
+	for _, raw := range source.Models {
+		models = append(models, append(json.RawMessage(nil), raw...))
 	}
-	catalogHash := sha256Hex(encodedEntry)
-	models, err := replaceModel(source.Models, alias, encodedEntry)
-	if err != nil {
-		return GenerateResult{}, err
+	localEntries := make([]json.RawMessage, 0, len(resolved.Aliases))
+	modelMetadata := make(map[string]modelSource, len(resolved.Aliases))
+	for _, localAlias := range resolved.Aliases {
+		model := resolved.Models[localAlias]
+		resolvedCapabilities := resolved.Capabilities[localAlias]
+		encodedEntry, marshalErr := json.Marshal(newCatalogModel(localAlias, model, resolvedCapabilities, instructions, modelMessages))
+		if marshalErr != nil {
+			return GenerateResult{}, fmt.Errorf("encode Codex model metadata for %q: %w", localAlias, marshalErr)
+		}
+		localEntries = append(localEntries, encodedEntry)
+		models = append(models, encodedEntry)
+		modelMetadata[localAlias] = newModelSource(localAlias, model, resolvedCapabilities)
 	}
+	encodedLocalEntries, err := json.Marshal(localEntries)
+	if err != nil {
+		return GenerateResult{}, fmt.Errorf("encode proxy model set: %w", err)
+	}
+	catalogHash := sha256Hex(encodedLocalEntries)
 	document := catalogDocument{
 		Models: models,
 		BedrockLocalProxy: CatalogMetadata{
@@ -212,21 +245,7 @@ func Generate(ctx context.Context, options GenerateOptions) (GenerateResult, err
 			CatalogHash:        catalogHash,
 			OutputLimitVisible: outputLimitVisible,
 			BundledModels:      bundledModels,
-			Models: map[string]modelSource{alias: {
-				ConfigurationHash:  configurationHash(alias, model, capabilities),
-				MetadataProfile:    capabilities.MetadataProfile,
-				MetadataRevision:   capabilities.MetadataRevision,
-				MetadataSource:     capabilities.MetadataSource,
-				VerifiedAt:         capabilities.MetadataVerifiedAt,
-				ResponsesAPI:       capabilities.ResponsesSupported,
-				ContextWindow:      capabilities.ContextWindow,
-				MaxOutputTokens:    capabilities.MaxOutputTokens,
-				InputModalities:    append([]string(nil), capabilities.InputModalities...),
-				ReasoningSupported: capabilities.ReasoningSupported,
-				ReasoningEfforts:   append([]string(nil), capabilities.ReasoningEfforts...),
-				FunctionCalling:    capabilities.FunctionCalling,
-				ParallelCalls:      capabilities.ParallelCalls,
-			}},
+			Models:             modelMetadata,
 		},
 	}
 	catalogPath, err := resolveCatalogPath(options.ConfigPath, options.CatalogPath)
@@ -234,21 +253,24 @@ func Generate(ctx context.Context, options GenerateOptions) (GenerateResult, err
 		return GenerateResult{}, err
 	}
 	validate := func(candidate string) error {
-		return ValidateWithCodex(ctx, command, candidate, []string{alias}, runner)
+		return ValidateWithCodex(ctx, command, candidate, resolved.Aliases, runner)
 	}
 	if err := writeCatalogAtomic(catalogPath, document, validate); err != nil {
 		return GenerateResult{}, fmt.Errorf("write Codex model catalog: %w", err)
 	}
 	if !outputLimitVisible {
-		message := fmt.Sprintf("Codex %s does not expose max_output_tokens in its model catalog; the proxy will enforce the %d-token ceiling", codexVersion, capabilities.MaxOutputTokens)
-		if model.MaxTokens != nil {
-			message += fmt.Sprintf(" and apply the configured models.%s.max_tokens default when requests omit a limit", alias)
+		ceilings := make([]string, 0, len(resolved.Aliases))
+		for _, localAlias := range resolved.Aliases {
+			ceilings = append(ceilings, fmt.Sprintf("%s=%d", localAlias, resolved.Capabilities[localAlias].MaxOutputTokens))
 		}
+		message := fmt.Sprintf("Codex %s does not expose max_output_tokens in its model catalog; the proxy will enforce configured ceilings (%s)", codexVersion, strings.Join(ceilings, ", "))
 		warnings = append(warnings, message)
 	}
 	return GenerateResult{
 		CatalogPath:        catalogPath,
 		ModelAlias:         alias,
+		ModelAliases:       append([]string(nil), resolved.Aliases...),
+		SkippedModels:      append([]SkippedModel(nil), resolved.Skipped...),
 		CodexVersion:       codexVersion,
 		BundledCatalogHash: bundledHash,
 		MetadataRevision:   capabilities.MetadataRevision,
@@ -256,6 +278,24 @@ func Generate(ctx context.Context, options GenerateOptions) (GenerateResult, err
 		Warnings:           append([]string(nil), warnings...),
 		TOML:               ProfileTOML(alias, catalogPath, options.Config.Listen, catalogHash),
 	}, nil
+}
+
+func newModelSource(alias string, model config.ModelConfig, capabilities config.ResolvedCapabilities) modelSource {
+	return modelSource{
+		ConfigurationHash:  configurationHash(alias, model, capabilities),
+		MetadataProfile:    capabilities.MetadataProfile,
+		MetadataRevision:   capabilities.MetadataRevision,
+		MetadataSource:     capabilities.MetadataSource,
+		VerifiedAt:         capabilities.MetadataVerifiedAt,
+		ResponsesAPI:       capabilities.ResponsesSupported,
+		ContextWindow:      capabilities.ContextWindow,
+		MaxOutputTokens:    capabilities.MaxOutputTokens,
+		InputModalities:    append([]string(nil), capabilities.InputModalities...),
+		ReasoningSupported: capabilities.ReasoningSupported,
+		ReasoningEfforts:   append([]string(nil), capabilities.ReasoningEfforts...),
+		FunctionCalling:    capabilities.FunctionCalling,
+		ParallelCalls:      capabilities.ParallelCalls,
+	}
 }
 
 func ProfileTOML(alias, catalogPath, listen, catalogHash string) string {
@@ -312,6 +352,28 @@ func Inspect(path string) (CatalogMetadata, []string, error) {
 		aliases = append(aliases, alias)
 	}
 	sort.Strings(aliases)
+	localEntries := make([]json.RawMessage, 0, len(aliases))
+	for _, alias := range aliases {
+		var found json.RawMessage
+		for _, raw := range document.Models {
+			var identity catalogIdentity
+			if json.Unmarshal(raw, &identity) == nil && identity.Slug == alias {
+				found = raw
+				break
+			}
+		}
+		if found == nil {
+			return CatalogMetadata{}, nil, fmt.Errorf("proxy model %q is missing from generated catalog", alias)
+		}
+		localEntries = append(localEntries, found)
+	}
+	encodedLocalEntries, err := json.Marshal(localEntries)
+	if err != nil {
+		return CatalogMetadata{}, nil, err
+	}
+	if document.BedrockLocalProxy.CatalogHash == "" || document.BedrockLocalProxy.CatalogHash != sha256Hex(encodedLocalEntries) {
+		return CatalogMetadata{}, nil, errors.New("generated proxy model set does not match catalog_hash; regenerate the catalog")
+	}
 	return document.BedrockLocalProxy, aliases, nil
 }
 
@@ -326,6 +388,26 @@ func ValidateConfiguration(metadata CatalogMetadata, alias string, model config.
 	wanted := configurationHash(alias, model, capabilities)
 	if stored.ConfigurationHash == "" || stored.ConfigurationHash != wanted {
 		return fmt.Errorf("catalog metadata for model %q does not match the current proxy configuration; regenerate the catalog", alias)
+	}
+	return nil
+}
+
+// ValidateCatalogConfigurations verifies the complete eligible proxy model set
+// and every model fingerprint. Additions, removals, and configuration changes
+// all require catalog regeneration.
+func ValidateCatalogConfigurations(metadata CatalogMetadata, resolved CatalogModels) error {
+	actual := make([]string, 0, len(metadata.Models))
+	for alias := range metadata.Models {
+		actual = append(actual, alias)
+	}
+	sort.Strings(actual)
+	if strings.Join(actual, "\x00") != strings.Join(resolved.Aliases, "\x00") {
+		return fmt.Errorf("catalog model set is %s, current eligible model set is %s; regenerate the catalog", formatAliases(actual), formatAliases(resolved.Aliases))
+	}
+	for _, alias := range resolved.Aliases {
+		if err := ValidateConfiguration(metadata, alias, resolved.Models[alias], resolved.Capabilities[alias]); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -395,22 +477,108 @@ func ValidateWithCodex(ctx context.Context, command, path string, aliases []stri
 	return nil
 }
 
-func selectModel(models map[string]config.ModelConfig, requested string) (string, config.ModelConfig, error) {
-	requested = strings.TrimSpace(requested)
-	if requested != "" {
-		model, ok := models[requested]
-		if !ok {
-			return "", config.ModelConfig{}, fmt.Errorf("unknown model %q (configured: %s)", requested, strings.Join(sortedModelNames(models), ", "))
+// ResolveCatalogModels applies Codex eligibility rules to every configured
+// alias and selects the profile default without consulting Codex or AWS.
+func ResolveCatalogModels(cfg config.Config, requested string) (CatalogModels, error) {
+	return ResolveCatalogModelsForVersion(cfg, requested, "")
+}
+
+// ResolveCatalogModelsForVersion adds client-version-specific wire
+// compatibility to the normal Codex eligibility rules.
+func ResolveCatalogModelsForVersion(cfg config.Config, requested, codexVersion string) (CatalogModels, error) {
+	result := CatalogModels{
+		Models: make(map[string]config.ModelConfig), Capabilities: make(map[string]config.ResolvedCapabilities),
+	}
+	for _, alias := range sortedModelNames(cfg.Models) {
+		model := cfg.Models[alias]
+		if model.Capabilities == nil {
+			result.Skipped = append(result.Skipped, SkippedModel{Alias: alias, Reason: "capabilities are required for Codex metadata"})
+			continue
 		}
-		return requested, model, nil
+		capabilities, warnings, err := config.ResolveModelCapabilities(model)
+		if err != nil {
+			return CatalogModels{}, fmt.Errorf("resolve capabilities for model %q: %w", alias, err)
+		}
+		if err := config.ValidateCodexCompatibility(model, capabilities); err != nil {
+			result.Skipped = append(result.Skipped, SkippedModel{Alias: alias, Reason: err.Error()})
+			continue
+		}
+		if codexRequiresReasoning(codexVersion) && !capabilities.ReasoningSupported {
+			result.Skipped = append(result.Skipped, SkippedModel{Alias: alias, Reason: fmt.Sprintf("Codex %s sends adjustable reasoning settings; this model declares reasoning unsupported", codexVersion)})
+			continue
+		}
+		result.Aliases = append(result.Aliases, alias)
+		result.Models[alias] = model
+		result.Capabilities[alias] = capabilities
+		for _, warning := range warnings {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("model %s: %s", alias, warning))
+		}
 	}
-	if len(models) != 1 {
-		return "", config.ModelConfig{}, fmt.Errorf("--model is required when configuration contains multiple models (configured: %s)", strings.Join(sortedModelNames(models), ", "))
+	selected := strings.TrimSpace(requested)
+	if selected == "" {
+		selected = strings.TrimSpace(cfg.Codex.DefaultModel)
 	}
-	for alias, model := range models {
-		return alias, model, nil
+	if selected != "" {
+		if _, configured := cfg.Models[selected]; !configured {
+			return CatalogModels{}, fmt.Errorf("unknown model %q (configured: %s)", selected, strings.Join(sortedModelNames(cfg.Models), ", "))
+		}
+		if _, eligible := result.Models[selected]; !eligible {
+			reason := skippedReason(result.Skipped, selected)
+			return CatalogModels{}, fmt.Errorf("selected default model %q is not Codex-compatible: %s", selected, reason)
+		}
 	}
-	return "", config.ModelConfig{}, errors.New("configuration contains no models")
+	if len(result.Aliases) == 0 {
+		detail := formatSkipped(result.Skipped)
+		if detail == "" {
+			return CatalogModels{}, errors.New("configuration contains no Codex-compatible models")
+		}
+		return CatalogModels{}, fmt.Errorf("configuration contains no Codex-compatible models: %s", detail)
+	}
+	if selected == "" && len(result.Aliases) == 1 {
+		selected = result.Aliases[0]
+	}
+	if selected == "" {
+		return CatalogModels{}, fmt.Errorf("codex.default_model or --model is required when multiple Codex-compatible models are configured (eligible: %s)", strings.Join(result.Aliases, ", "))
+	}
+	result.DefaultAlias = selected
+	return result, nil
+}
+
+func codexRequiresReasoning(version string) bool {
+	parts := strings.Split(strings.TrimSpace(version), ".")
+	if len(parts) < 2 {
+		return false
+	}
+	major, majorErr := strconv.Atoi(parts[0])
+	minor, minorErr := strconv.Atoi(parts[1])
+	if majorErr != nil || minorErr != nil {
+		return false
+	}
+	return major > 0 || minor >= 154
+}
+
+func skippedReason(models []SkippedModel, alias string) string {
+	for _, model := range models {
+		if model.Alias == alias {
+			return model.Reason
+		}
+	}
+	return "not Codex-compatible"
+}
+
+func formatSkipped(models []SkippedModel) string {
+	values := make([]string, 0, len(models))
+	for _, model := range models {
+		values = append(values, fmt.Sprintf("%s (%s)", model.Alias, model.Reason))
+	}
+	return strings.Join(values, "; ")
+}
+
+func formatAliases(aliases []string) string {
+	if len(aliases) == 0 {
+		return "(none)"
+	}
+	return strings.Join(aliases, ", ")
 }
 
 func sortedModelNames(models map[string]config.ModelConfig) []string {
@@ -621,21 +789,6 @@ func reasoningDescription(effort string) string {
 	default:
 		return effort
 	}
-}
-
-func replaceModel(models []json.RawMessage, alias string, replacement json.RawMessage) ([]json.RawMessage, error) {
-	result := make([]json.RawMessage, 0, len(models)+1)
-	for _, raw := range models {
-		var identity catalogIdentity
-		if err := json.Unmarshal(raw, &identity); err != nil || strings.TrimSpace(identity.Slug) == "" {
-			return nil, errors.New("bundled Codex catalog contains a model without a valid slug")
-		}
-		if identity.Slug == alias {
-			continue
-		}
-		result = append(result, append(json.RawMessage(nil), raw...))
-	}
-	return append(result, replacement), nil
 }
 
 func writeCatalogAtomic(path string, document catalogDocument, validate func(string) error) error {

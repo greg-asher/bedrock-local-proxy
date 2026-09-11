@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -26,7 +27,22 @@ func (f fakeRunner) Run(_ context.Context, _ string, args ...string) ([]byte, []
 		return f.version, nil, nil
 	}
 	if len(args) >= 3 && args[0] == "debug" && args[1] == "models" && args[2] == "-c" {
-		return []byte(`{"models":[{"slug":"coding"}]}`), nil, nil
+		path, err := strconv.Unquote(strings.TrimPrefix(args[3], "model_catalog_json="))
+		if err != nil {
+			return nil, nil, err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		var document struct {
+			Models []catalogIdentity `json:"models"`
+		}
+		if err := json.Unmarshal(data, &document); err != nil {
+			return nil, nil, err
+		}
+		encoded, err := json.Marshal(document)
+		return encoded, nil, err
 	}
 	return f.catalog, nil, nil
 }
@@ -107,6 +123,116 @@ func TestGenerateRequiresModelForMultipleAliases(t *testing.T) {
 	_, err := Generate(context.Background(), GenerateOptions{Config: cfg, Runner: fakeRunner{}})
 	if err == nil || !strings.Contains(err.Error(), "--model is required") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestGenerateIncludesEveryEligibleModelAndSkipsIncompatibleModels(t *testing.T) {
+	cfg := multiCatalogTestConfig()
+	path := filepath.Join(t.TempDir(), "models.json")
+	result, err := Generate(context.Background(), GenerateOptions{Config: cfg, CatalogPath: path, ProxyVersion: "test", Runner: fakeRunner{version: []byte("codex-cli 0.154.0"), catalog: bundledFixture()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"astra", "luna", "sol", "terra"}
+	if strings.Join(result.ModelAliases, ",") != strings.Join(want, ",") || result.ModelAlias != "luna" {
+		t.Fatalf("default=%q aliases=%v", result.ModelAlias, result.ModelAliases)
+	}
+	if len(result.SkippedModels) != 1 || result.SkippedModels[0].Alias != "fable" || !strings.Contains(result.SkippedModels[0].Reason, "does not support the Responses API") {
+		t.Fatalf("skipped=%+v", result.SkippedModels)
+	}
+	metadata, aliases, err := Inspect(path)
+	if err != nil || strings.Join(aliases, ",") != strings.Join(want, ",") || len(metadata.Models) != 4 {
+		t.Fatalf("metadata=%+v aliases=%v err=%v", metadata, aliases, err)
+	}
+}
+
+func TestGenerateCatalogIsIndependentOfDefaultOverride(t *testing.T) {
+	cfg := multiCatalogTestConfig()
+	root := t.TempDir()
+	options := GenerateOptions{Config: cfg, ProxyVersion: "test", Runner: fakeRunner{version: []byte("codex-cli 0.154.0"), catalog: bundledFixture()}}
+	options.CatalogPath = filepath.Join(root, "luna.json")
+	luna, err := Generate(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.ModelAlias = "astra"
+	options.CatalogPath = filepath.Join(root, "astra.json")
+	astra, err := Generate(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lunaBytes, _ := os.ReadFile(luna.CatalogPath)
+	astraBytes, _ := os.ReadFile(astra.CatalogPath)
+	if luna.CatalogHash != astra.CatalogHash || string(lunaBytes) != string(astraBytes) {
+		t.Fatal("changing only the default changed catalog bytes or hash")
+	}
+	if !strings.Contains(luna.TOML, `model = "luna"`) || !strings.Contains(astra.TOML, `model = "astra"`) {
+		t.Fatalf("unexpected profiles:\n%s\n%s", luna.TOML, astra.TOML)
+	}
+}
+
+func TestResolveCatalogModelsRejectsIneligibleDefaultAndInvalidPartialMetadata(t *testing.T) {
+	cfg := multiCatalogTestConfig()
+	cfg.Codex.DefaultModel = "fable"
+	if _, err := ResolveCatalogModels(cfg, ""); err == nil || !strings.Contains(err.Error(), `selected default model "fable"`) {
+		t.Fatalf("ineligible default error=%v", err)
+	}
+	cfg = multiCatalogTestConfig()
+	broken := cfg.Models["terra"]
+	broken.Capabilities.ContextWindow = nil
+	cfg.Models["terra"] = broken
+	if _, err := ResolveCatalogModels(cfg, ""); err == nil || !strings.Contains(err.Error(), `resolve capabilities for model "terra"`) {
+		t.Fatalf("partial metadata error=%v", err)
+	}
+}
+
+func TestValidateCatalogConfigurationsDetectsSetChanges(t *testing.T) {
+	cfg := multiCatalogTestConfig()
+	path := filepath.Join(t.TempDir(), "models.json")
+	_, err := Generate(context.Background(), GenerateOptions{Config: cfg, CatalogPath: path, Runner: fakeRunner{version: []byte("codex-cli 0.154.0"), catalog: bundledFixture()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, _, err := Inspect(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(cfg.Models, "terra")
+	resolved, err := ResolveCatalogModels(cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateCatalogConfigurations(metadata, resolved); err == nil || !strings.Contains(err.Error(), "model set") {
+		t.Fatalf("set drift error=%v", err)
+	}
+}
+
+func TestGenerateSupportsCodexCatalogBaselines(t *testing.T) {
+	for _, version := range []string{"0.142.5", "0.154.0"} {
+		t.Run(version, func(t *testing.T) {
+			_, err := Generate(context.Background(), GenerateOptions{Config: catalogTestConfig(), CatalogPath: filepath.Join(t.TempDir(), "models.json"), Runner: fakeRunner{version: []byte("codex-cli " + version), catalog: bundledFixture()}})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestCodex0154RequiresReasoningCapableModels(t *testing.T) {
+	cfg := catalogTestConfig()
+	model := cfg.Models["coding"]
+	disabled := false
+	model.Capabilities.Reasoning.Supported = &disabled
+	model.Capabilities.Reasoning.Efforts = nil
+	cfg.Models["coding"] = model
+	if resolved, err := ResolveCatalogModelsForVersion(cfg, "", "0.142.5"); err != nil || len(resolved.Aliases) != 1 {
+		t.Fatalf("0.142.5 resolved=%+v err=%v", resolved, err)
+	}
+	if _, err := ResolveCatalogModelsForVersion(cfg, "", "0.154.0"); err == nil || !strings.Contains(err.Error(), "adjustable reasoning") {
+		t.Fatalf("0.154.0 error=%v", err)
+	}
+	if _, err := ResolveCatalogModelsForVersion(cfg, "", "1.0.0"); err == nil || !strings.Contains(err.Error(), "adjustable reasoning") {
+		t.Fatalf("1.0.0 error=%v", err)
 	}
 }
 
@@ -251,6 +377,35 @@ func TestInspectRejectsChangedBundledModel(t *testing.T) {
 	}
 }
 
+func TestInspectRejectsChangedProxyModel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "models.json")
+	_, err := Generate(context.Background(), GenerateOptions{Config: catalogTestConfig(), CatalogPath: path, Runner: fakeRunner{version: []byte("codex-cli 0.142.5"), catalog: bundledFixture()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document catalogDocument
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	var local map[string]any
+	if err := json.Unmarshal(document.Models[len(document.Models)-1], &local); err != nil {
+		t.Fatal(err)
+	}
+	local["context_window"] = float64(1)
+	document.Models[len(document.Models)-1], _ = json.Marshal(local)
+	tampered, _ := json.Marshal(document)
+	if err := os.WriteFile(path, tampered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Inspect(path); err == nil || !strings.Contains(err.Error(), "catalog_hash") {
+		t.Fatalf("proxy model integrity error=%v", err)
+	}
+}
+
 func TestGenerateIsIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "models.json")
 	options := GenerateOptions{Config: catalogTestConfig(), CatalogPath: path, ProxyVersion: "test", Runner: fakeRunner{version: []byte("codex-cli 0.142.5"), catalog: bundledFixture()}}
@@ -291,6 +446,22 @@ func catalogTestConfig() config.Config {
 		Listen:  "127.0.0.1:8787",
 		Models:  map[string]config.ModelConfig{"coding": completeModel(true)},
 	}
+}
+
+func multiCatalogTestConfig() config.Config {
+	models := make(map[string]config.ModelConfig)
+	for _, alias := range []string{"terra", "astra", "luna", "sol"} {
+		model := completeModel(true)
+		model.DisplayName = strings.ToUpper(alias)
+		model.BedrockModelID = alias + "-target"
+		models[alias] = model
+	}
+	fable := completeModel(true)
+	responses := false
+	fable.BedrockModelID = "anthropic-fable-target"
+	fable.Capabilities.ResponsesAPI = &responses
+	models["fable"] = fable
+	return config.Config{Version: 1, AWS: config.AWSConfig{Profile: "profile", Region: "us-east-2"}, Listen: "127.0.0.1:8787", Codex: config.CodexConfig{DefaultModel: "luna"}, Models: models}
 }
 
 func completeModel(functionCalling bool) config.ModelConfig {

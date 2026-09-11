@@ -10,8 +10,19 @@ listen: 127.0.0.1:8787
 # reporting:
 #   directory: reports
 
+# Default alias written to the generated Codex profile. The generated catalog
+# includes every configured alias with complete Codex-compatible capabilities.
+codex:
+  default_model: luna
+
+# Defaults used by `bedrock-proxy configure claude`. Uncomment after adding a
+# Messages-compatible model alias with an exact canonical Anthropic identity.
+# claude:
+#   default_model: fable
+#   subagent_model: fable
+
 models:
-  coding:
+  luna:
     display_name: Replace me
     bedrock_model_id: REPLACE_WITH_YOUR_BEDROCK_MODEL_ID
     input_per_million: 0
@@ -19,12 +30,15 @@ models:
     temperature: 0.2
     max_tokens: 8192
 
-    # Required only for Codex catalog generation. Use an exact bundled profile
-    # when one matches bedrock_model_id, or supply every explicit value from
-    # authoritative documentation. The placeholders below are not defaults.
+    # Required for generated Codex or Claude Code metadata. Use an exact
+    # bundled profile when one matches bedrock_model_id, or supply every
+    # explicit value from authoritative documentation. The placeholders below
+    # are not defaults.
     # capabilities:
     #   metadata_profile: REPLACE_WITH_EXACT_SUPPORTED_PROFILE
     #   responses_api: true # required for an unrecognized Codex target; verify against AWS docs
+    #   messages_api: true # required for an unrecognized Claude target; verify against AWS docs
+    #   anthropic_model_id: REPLACE_WITH_CANONICAL_CLAUDE_MODEL_ID
     #   context_window: REPLACE_WITH_DOCUMENTED_INTEGER
     #   max_output_tokens: REPLACE_WITH_DOCUMENTED_INTEGER
     #   input_modalities: [text]

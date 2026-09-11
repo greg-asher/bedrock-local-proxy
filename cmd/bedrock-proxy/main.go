@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gregasher/bedrock-local-proxy/internal/accounting"
+	"github.com/gregasher/bedrock-local-proxy/internal/claude"
 	"github.com/gregasher/bedrock-local-proxy/internal/codex"
 	"github.com/gregasher/bedrock-local-proxy/internal/config"
 	"github.com/gregasher/bedrock-local-proxy/internal/doctor"
@@ -26,6 +27,7 @@ import (
 
 var version = "dev"
 var codexCommandRunner codex.CommandRunner = codex.ExecRunner{}
+var claudeCommandRunner claude.CommandRunner = claude.ExecRunner{}
 
 type record struct {
 	Event      string   `json:"event"`
@@ -65,11 +67,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runReport(args[1:], stdout, stderr)
 	}
 	if len(args) > 0 && args[0] == "configure" {
-		if len(args) < 2 || args[1] != "codex" {
-			diagnostic(stderr, "text", errors.New("configure requires the codex subcommand"))
+		if len(args) < 2 {
+			diagnostic(stderr, "text", errors.New("configure requires the codex or claude subcommand"))
 			return 2
 		}
-		return runConfigureCodex(args[2:], stdout, stderr)
+		switch args[1] {
+		case "codex":
+			return runConfigureCodex(args[2:], stdout, stderr)
+		case "claude":
+			return runConfigureClaude(args[2:], stdout, stderr)
+		default:
+			diagnostic(stderr, "text", errors.New("configure requires the codex or claude subcommand"))
+			return 2
+		}
 	}
 	if len(args) > 0 && args[0] == "doctor" {
 		return runDoctor(args[1:], stdout, stderr)
@@ -77,11 +87,71 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return runProxy(args, stdout, stderr)
 }
 
+func runConfigureClaude(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("bedrock-proxy configure claude", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	configPath := flags.String("config", "", "path to YAML configuration")
+	model := flags.String("model", "", "override the configured Claude default model")
+	settingsPath := flags.String("settings", "", "output path for generated Claude Code settings")
+	if err := flags.Parse(args); err != nil {
+		diagnostic(stderr, "text", err)
+		return 2
+	}
+	if flags.NArg() != 0 {
+		diagnostic(stderr, "text", errors.New("configure claude does not accept positional arguments"))
+		return 2
+	}
+	path, cfg, err := loadConfiguration(*configPath)
+	if err != nil {
+		diagnostic(stderr, "text", err)
+		return 1
+	}
+	result, err := claude.Generate(context.Background(), claude.GenerateOptions{
+		Config:       cfg,
+		ConfigPath:   path,
+		ModelAlias:   *model,
+		SettingsPath: *settingsPath,
+		Runner:       claudeCommandRunner,
+	})
+	if err != nil {
+		diagnostic(stderr, "text", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Claude settings: %s\n", result.SettingsPath)
+	fmt.Fprintf(stdout, "Claude version: %s\n", result.ClaudeVersion)
+	fmt.Fprintf(stdout, "Default model: %s\n", result.ModelAlias)
+	fmt.Fprintf(stdout, "Subagent model: %s\n", result.SubagentAlias)
+	fmt.Fprintf(stdout, "Picker models: %s\n", strings.Join(result.ModelAliases, ", "))
+	if len(result.SkippedModels) != 0 {
+		fmt.Fprintln(stdout, "Skipped models:")
+		for _, skipped := range result.SkippedModels {
+			fmt.Fprintf(stdout, "  %s: %s\n", skipped.Alias, skipped.Reason)
+		}
+	}
+	for _, message := range result.Warnings {
+		fmt.Fprintf(stderr, "WARNING: %s\n", message)
+	}
+	for _, skipped := range result.SkippedModels {
+		fmt.Fprintf(stderr, "WARNING: skipped model %s: %s\n", skipped.Alias, skipped.Reason)
+	}
+	fmt.Fprintf(stdout, "Then run: claude --settings %s\n", shellQuote(result.SettingsPath))
+	return 0
+}
+
+func shellQuote(value string) string {
+	if value != "" && strings.IndexFunc(value, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && !strings.ContainsRune("_@%+=:,./-", r)
+	}) == -1 {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
 func runConfigureCodex(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("bedrock-proxy configure codex", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	configPath := flags.String("config", "", "path to YAML configuration")
-	model := flags.String("model", "", "configured model alias")
+	model := flags.String("model", "", "override the configured Codex default model")
 	catalogPath := flags.String("catalog", "", "output path for the generated Codex model catalog")
 	if err := flags.Parse(args); err != nil {
 		diagnostic(stderr, "text", err)
@@ -115,9 +185,20 @@ func runConfigureCodex(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "Codex catalog: %s\n", result.CatalogPath)
 	fmt.Fprintf(stdout, "Codex version: %s\n", result.CodexVersion)
-	fmt.Fprintf(stdout, "Model:         %s\n\n", result.ModelAlias)
+	fmt.Fprintf(stdout, "Default model: %s\n", result.ModelAlias)
+	fmt.Fprintf(stdout, "Catalog models: %s\n", strings.Join(result.ModelAliases, ", "))
+	if len(result.SkippedModels) != 0 {
+		fmt.Fprintln(stdout, "Skipped models:")
+		for _, skipped := range result.SkippedModels {
+			fmt.Fprintf(stdout, "  %s: %s\n", skipped.Alias, skipped.Reason)
+		}
+	}
+	fmt.Fprintln(stdout)
 	for _, message := range result.Warnings {
 		fmt.Fprintf(stderr, "WARNING: %s\n", message)
+	}
+	for _, skipped := range result.SkippedModels {
+		fmt.Fprintf(stderr, "WARNING: skipped model %s: %s\n", skipped.Alias, skipped.Reason)
 	}
 	fmt.Fprintf(stdout, "Save this profile as %s:\n\n%s\n", profilePath, result.TOML)
 	fmt.Fprintf(stdout, "Then run: codex --profile %s\n", codex.DefaultProfileName)
@@ -128,8 +209,9 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("bedrock-proxy doctor", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	configPath := flags.String("config", "", "path to YAML configuration")
-	client := flags.String("client", "", "client compatibility checks: codex")
-	model := flags.String("model", "", "configured model alias")
+	client := flags.String("client", "", "client compatibility checks: codex or claude")
+	model := flags.String("model", "", "override the configured client default model")
+	settingsPath := flags.String("settings", "", "path to generated Claude Code settings")
 	live := flags.Bool("live", false, "exercise a running proxy and AWS target")
 	if err := flags.Parse(args); err != nil {
 		diagnostic(stderr, "text", err)
@@ -148,12 +230,14 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	result := doctor.Run(context.Background(), doctor.Options{
-		Config:      cfg,
-		ConfigPath:  path,
-		Client:      *client,
-		ModelAlias:  *model,
-		Live:        *live,
-		CodexRunner: codexCommandRunner,
+		Config:             cfg,
+		ConfigPath:         path,
+		Client:             *client,
+		ModelAlias:         *model,
+		ClaudeSettingsPath: *settingsPath,
+		Live:               *live,
+		CodexRunner:        codexCommandRunner,
+		ClaudeRunner:       claudeCommandRunner,
 	})
 	for _, check := range result.Checks {
 		fmt.Fprintf(stdout, "%-7s %-28s [%s] %s\n", strings.ToUpper(string(check.Status)), check.Name, check.Category, check.Message)
