@@ -89,6 +89,10 @@ func Run(ctx context.Context, options Options) Result {
 		result.Checks = append(result.Checks, Check{Name: "model capabilities", Status: Failed, Category: "model_capability", Message: err.Error()})
 		return result
 	}
+	if err := config.ValidateCodexCompatibility(model, capabilities); err != nil {
+		result.Checks = append(result.Checks, Check{Name: "Responses compatibility", Status: Failed, Category: "model_capability", Message: err.Error()})
+		return result
+	}
 	status := Passed
 	message := fmt.Sprintf("%s: context=%d output=%d modalities=%s", alias, capabilities.ContextWindow, capabilities.MaxOutputTokens, strings.Join(capabilities.InputModalities, ","))
 	if len(warnings) != 0 {
@@ -252,7 +256,12 @@ type profileFile struct {
 	ModelCatalogJSON string                     `toml:"model_catalog_json"`
 	WebSearch        string                     `toml:"web_search"`
 	Tools            profileTools               `toml:"tools"`
+	Features         profileFeatures            `toml:"features"`
 	ModelProviders   map[string]profileProvider `toml:"model_providers"`
+}
+
+type profileFeatures struct {
+	Apps *bool `toml:"apps"`
 }
 
 type profileTools struct {
@@ -298,6 +307,9 @@ func validateProfile(path, alias, catalogPath, listen, catalogHash string) error
 	}
 	if profile.WebSearch != "disabled" || profile.Tools.WebSearch == nil || *profile.Tools.WebSearch {
 		return fmt.Errorf("profile %s must disable hosted web search", path)
+	}
+	if profile.Features.Apps == nil || *profile.Features.Apps {
+		return fmt.Errorf("profile %s must disable ChatGPT apps so their internal codex_apps MCP does not interrupt local-provider startup; configured MCP servers remain available", path)
 	}
 	provider, ok := profile.ModelProviders[codex.ProviderID]
 	if !ok {

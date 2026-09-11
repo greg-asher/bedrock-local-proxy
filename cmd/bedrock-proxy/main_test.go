@@ -35,7 +35,7 @@ func TestConfigureCodexCommandWritesCatalogAndPrintsProfile(t *testing.T) {
 	t.Cleanup(func() { codexCommandRunner = oldRunner })
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.yaml")
-	configText := "version: 1\naws:\n  profile: offline\n  region: us-east-2\nmodels:\n  coding:\n    bedrock_model_id: custom\n    capabilities:\n      context_window: 1000\n      max_output_tokens: 128\n      input_modalities: [text]\n      reasoning:\n        supported: false\n      tools:\n        function_calling: true\n        parallel_calls: false\n"
+	configText := "version: 1\naws:\n  profile: offline\n  region: us-east-2\nmodels:\n  coding:\n    bedrock_model_id: custom\n    capabilities:\n      responses_api: true\n      context_window: 1000\n      max_output_tokens: 128\n      input_modalities: [text]\n      reasoning:\n        supported: false\n      tools:\n        function_calling: true\n        parallel_calls: false\n"
 	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestConfigureCodexCommandWritesCatalogAndPrintsProfile(t *testing.T) {
 	if _, err := os.Stat(catalogPath); err != nil {
 		t.Fatal(err)
 	}
-	for _, wanted := range []string{"Codex version: 0.142.5", "model = \"coding\"", "wire_api = \"responses\"", "supports_standalone_web_search = false", "X-Bedrock-Proxy-Catalog"} {
+	for _, wanted := range []string{"Codex version: 0.142.5", "model = \"coding\"", "wire_api = \"responses\"", "features.apps = false", "supports_standalone_web_search = false", "X-Bedrock-Proxy-Catalog"} {
 		if !strings.Contains(stdout.String(), wanted) {
 			t.Fatalf("output missing %q: %s", wanted, stdout.String())
 		}

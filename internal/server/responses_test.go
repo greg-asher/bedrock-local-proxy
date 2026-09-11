@@ -235,6 +235,23 @@ func TestResponsesEnforcesDeclaredCapabilitiesAndPreservesFunctionTools(t *testi
 	}
 }
 
+func TestResponsesRejectsDocumentedIncompatibleTargetBeforeAWS(t *testing.T) {
+	cfg := chatTestConfig()
+	model := cfg.Models["coding"]
+	model.BedrockModelID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+	model.Capabilities = nil
+	cfg.Models["coding"] = model
+	fake := &fakeRequestDoer{}
+	s := NewWithTransport(cfg, fake)
+	var result CompletionResult
+	s.SetCompletionRecorder(func(got CompletionResult) { result = got })
+	recorder := httptest.NewRecorder()
+	s.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"coding","input":"hello"}`)))
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "unsupported_model_api") || fake.request != nil || result.UnsupportedFeatureRejections != 1 {
+		t.Fatalf("response=(%d,%s) upstream=%v result=%+v", recorder.Code, recorder.Body.String(), fake.request, result)
+	}
+}
+
 func TestResponsesPreservesParallelFunctionCallShapes(t *testing.T) {
 	cfg := chatTestConfig()
 	model := responseCapabilityModel()
@@ -305,12 +322,13 @@ func TestResponsesDoesNotPersistArbitraryHeaderValues(t *testing.T) {
 }
 
 func responseCapabilityModel() config.ModelConfig {
-	functionCalling, parallel, reasoning := true, false, false
+	responses, functionCalling, parallel, reasoning := true, true, false, false
 	contextWindow, maxOutput := int64(1000), int64(128)
 	return config.ModelConfig{
 		BedrockModelID: "custom-target",
 		MaxTokens:      intPtr(64),
 		Capabilities: &config.CapabilityConfig{
+			ResponsesAPI:    &responses,
 			ContextWindow:   &contextWindow,
 			MaxOutputTokens: &maxOutput,
 			InputModalities: []string{"text"},

@@ -288,10 +288,10 @@ func usage(input, output int) map[string]any {
 
 func integrationConfig(listen string) config.Config {
 	contextWindow, maxOutput := int64(200000), int64(64000)
-	reasoning, functions, parallel := false, true, true
+	responses, reasoning, functions, parallel := true, false, true, true
 	maxTokens := 8192
 	return config.Config{Version: 1, AWS: config.AWSConfig{Profile: "must-not-load", Region: "us-east-2"}, Listen: listen, Models: map[string]config.ModelConfig{"coding": {
 		DisplayName: "Offline MCP target", BedrockModelID: "fake-bedrock-target", MaxTokens: &maxTokens,
-		Capabilities: &config.CapabilityConfig{ContextWindow: &contextWindow, MaxOutputTokens: &maxOutput, InputModalities: []string{"text"}, Reasoning: config.ReasoningCapability{Supported: &reasoning}, Tools: config.ToolCapability{FunctionCalling: &functions, ParallelCalls: &parallel}},
+		Capabilities: &config.CapabilityConfig{ResponsesAPI: &responses, ContextWindow: &contextWindow, MaxOutputTokens: &maxOutput, InputModalities: []string{"text"}, Reasoning: config.ReasoningCapability{Supported: &reasoning}, Tools: config.ToolCapability{FunctionCalling: &functions, ParallelCalls: &parallel}},
 	}}}
 }

@@ -83,6 +83,7 @@ type modelSource struct {
 	MetadataRevision   string   `json:"metadata_revision,omitempty"`
 	MetadataSource     string   `json:"metadata_source,omitempty"`
 	VerifiedAt         string   `json:"verified_at,omitempty"`
+	ResponsesAPI       bool     `json:"responses_api"`
 	ContextWindow      int64    `json:"context_window"`
 	MaxOutputTokens    int64    `json:"max_output_tokens"`
 	InputModalities    []string `json:"input_modalities"`
@@ -146,8 +147,8 @@ func Generate(ctx context.Context, options GenerateOptions) (GenerateResult, err
 	if err != nil {
 		return GenerateResult{}, fmt.Errorf("resolve capabilities for model %q: %w", alias, err)
 	}
-	if !capabilities.FunctionCalling {
-		return GenerateResult{}, fmt.Errorf("model %q must support function calling for Codex", alias)
+	if err := config.ValidateCodexCompatibility(model, capabilities); err != nil {
+		return GenerateResult{}, fmt.Errorf("model %q is not Codex-compatible: %w", alias, err)
 	}
 	runner := options.Runner
 	if runner == nil {
@@ -217,6 +218,7 @@ func Generate(ctx context.Context, options GenerateOptions) (GenerateResult, err
 				MetadataRevision:   capabilities.MetadataRevision,
 				MetadataSource:     capabilities.MetadataSource,
 				VerifiedAt:         capabilities.MetadataVerifiedAt,
+				ResponsesAPI:       capabilities.ResponsesSupported,
 				ContextWindow:      capabilities.ContextWindow,
 				MaxOutputTokens:    capabilities.MaxOutputTokens,
 				InputModalities:    append([]string(nil), capabilities.InputModalities...),
@@ -261,7 +263,7 @@ func ProfileTOML(alias, catalogPath, listen, catalogHash string) string {
 		listen = config.DefaultListen
 	}
 	baseURL := "http://" + listen + "/v1"
-	return fmt.Sprintf("model = %s\nmodel_provider = %q\nmodel_catalog_json = %s\nweb_search = %q\ntools.web_search = false\n\n[model_providers.%s]\nname = %q\nbase_url = %q\nwire_api = %q\nhttp_headers = { Authorization = %q, X-Bedrock-Proxy-Catalog = %q }\nrequires_openai_auth = false\nsupports_standalone_web_search = false\nsupports_websockets = false\nrequest_max_retries = 0\nstream_max_retries = 0\n",
+	return fmt.Sprintf("model = %s\nmodel_provider = %q\nmodel_catalog_json = %s\nweb_search = %q\ntools.web_search = false\nfeatures.apps = false\n\n[model_providers.%s]\nname = %q\nbase_url = %q\nwire_api = %q\nhttp_headers = { Authorization = %q, X-Bedrock-Proxy-Catalog = %q }\nrequires_openai_auth = false\nsupports_standalone_web_search = false\nsupports_websockets = false\nrequest_max_retries = 0\nstream_max_retries = 0\n",
 		strconv.Quote(alias), ProviderID, strconv.Quote(catalogPath), "disabled", ProviderID, "Bedrock Local Proxy", baseURL, "responses", "Bearer local", catalogHash)
 }
 
@@ -579,6 +581,7 @@ func configurationHash(alias string, model config.ModelConfig, capabilities conf
 		BedrockModelID     string   `json:"bedrock_model_id"`
 		MetadataProfile    string   `json:"metadata_profile"`
 		MetadataRevision   string   `json:"metadata_revision"`
+		ResponsesAPI       bool     `json:"responses_api"`
 		ContextWindow      int64    `json:"context_window"`
 		MaxOutputTokens    int64    `json:"max_output_tokens"`
 		InputModalities    []string `json:"input_modalities"`
@@ -589,6 +592,7 @@ func configurationHash(alias string, model config.ModelConfig, capabilities conf
 	}{
 		Alias: alias, DisplayName: strings.TrimSpace(model.DisplayName), BedrockModelID: strings.TrimSpace(model.BedrockModelID),
 		MetadataProfile: capabilities.MetadataProfile, MetadataRevision: capabilities.MetadataRevision,
+		ResponsesAPI:  capabilities.ResponsesSupported,
 		ContextWindow: capabilities.ContextWindow, MaxOutputTokens: capabilities.MaxOutputTokens,
 		InputModalities: append([]string(nil), capabilities.InputModalities...), ReasoningSupported: capabilities.ReasoningSupported,
 		ReasoningEfforts: append([]string(nil), capabilities.ReasoningEfforts...), FunctionCalling: capabilities.FunctionCalling,

@@ -39,7 +39,7 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request) {
 		var invalid *responsesValidationError
 		if errors.As(err, &invalid) {
 			s.writeOpenAIErrorDetails(w, status, invalid.Message, "invalid_request_error", invalid.Param, invalid.Code)
-			if invalid.Code == "unsupported_hosted_tool" {
+			if invalid.Code == "unsupported_hosted_tool" || invalid.Code == "unsupported_model_api" {
 				result.UnsupportedFeatureRejections = 1
 			}
 		} else {
@@ -197,11 +197,17 @@ type responseToolDefinition struct {
 }
 
 func validateResponsesCapabilities(fields map[string]json.RawMessage, model config.ModelConfig) error {
+	if err := config.ValidateResponsesTarget(model); err != nil {
+		return &responsesValidationError{Message: err.Error(), Param: "model", Code: "unsupported_model_api"}
+	}
 	var resolved *config.ResolvedCapabilities
 	if model.Capabilities != nil {
 		value, _, err := config.ResolveModelCapabilities(model)
 		if err != nil {
 			return &responsesValidationError{Message: "configured model capabilities are invalid: " + err.Error(), Param: "model", Code: "invalid_model_capabilities"}
+		}
+		if value.ResponsesKnown && !value.ResponsesSupported {
+			return &responsesValidationError{Message: "the configured model does not support the Responses API on bedrock-runtime", Param: "model", Code: "unsupported_model_api"}
 		}
 		resolved = &value
 	}
