@@ -52,8 +52,12 @@ type SessionInfo struct {
 }
 
 type sessionModel struct {
-	Alias          string `json:"alias"`
-	BedrockModelID string `json:"bedrock_model_id"`
+	Alias            string `json:"alias"`
+	BedrockModelID   string `json:"bedrock_model_id"`
+	MetadataProfile  string `json:"metadata_profile,omitempty"`
+	MetadataRevision string `json:"metadata_revision,omitempty"`
+	ContextWindow    int64  `json:"context_window,omitempty"`
+	MaxOutputTokens  int64  `json:"max_output_tokens,omitempty"`
 }
 
 type sessionManifest struct {
@@ -268,7 +272,17 @@ func reportModels(models map[string]config.ModelConfig) []sessionModel {
 	sort.Strings(names)
 	result := make([]sessionModel, 0, len(names))
 	for _, name := range names {
-		result = append(result, sessionModel{Alias: name, BedrockModelID: models[name].BedrockModelID})
+		model := models[name]
+		entry := sessionModel{Alias: name, BedrockModelID: model.BedrockModelID}
+		if model.Capabilities != nil {
+			if capabilities, _, err := config.ResolveModelCapabilities(model); err == nil {
+				entry.MetadataProfile = capabilities.MetadataProfile
+				entry.MetadataRevision = capabilities.MetadataRevision
+				entry.ContextWindow = capabilities.ContextWindow
+				entry.MaxOutputTokens = capabilities.MaxOutputTokens
+			}
+		}
+		result = append(result, entry)
 	}
 	return result
 }

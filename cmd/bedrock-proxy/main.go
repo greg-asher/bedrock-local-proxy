@@ -17,12 +17,15 @@ import (
 	"time"
 
 	"github.com/gregasher/bedrock-local-proxy/internal/accounting"
+	"github.com/gregasher/bedrock-local-proxy/internal/codex"
 	"github.com/gregasher/bedrock-local-proxy/internal/config"
+	"github.com/gregasher/bedrock-local-proxy/internal/doctor"
 	"github.com/gregasher/bedrock-local-proxy/internal/reports"
 	"github.com/gregasher/bedrock-local-proxy/internal/server"
 )
 
 var version = "dev"
+var codexCommandRunner codex.CommandRunner = codex.ExecRunner{}
 
 type record struct {
 	Event      string   `json:"event"`
@@ -61,7 +64,120 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "report" {
 		return runReport(args[1:], stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "configure" {
+		if len(args) < 2 || args[1] != "codex" {
+			diagnostic(stderr, "text", errors.New("configure requires the codex subcommand"))
+			return 2
+		}
+		return runConfigureCodex(args[2:], stdout, stderr)
+	}
+	if len(args) > 0 && args[0] == "doctor" {
+		return runDoctor(args[1:], stdout, stderr)
+	}
 	return runProxy(args, stdout, stderr)
+}
+
+func runConfigureCodex(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("bedrock-proxy configure codex", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	configPath := flags.String("config", "", "path to YAML configuration")
+	model := flags.String("model", "", "configured model alias")
+	catalogPath := flags.String("catalog", "", "output path for the generated Codex model catalog")
+	if err := flags.Parse(args); err != nil {
+		diagnostic(stderr, "text", err)
+		return 2
+	}
+	if flags.NArg() != 0 {
+		diagnostic(stderr, "text", errors.New("configure codex does not accept positional arguments"))
+		return 2
+	}
+	path, cfg, err := loadConfiguration(*configPath)
+	if err != nil {
+		diagnostic(stderr, "text", err)
+		return 1
+	}
+	result, err := codex.Generate(context.Background(), codex.GenerateOptions{
+		Config:       cfg,
+		ConfigPath:   path,
+		ModelAlias:   *model,
+		CatalogPath:  *catalogPath,
+		ProxyVersion: version,
+		Runner:       codexCommandRunner,
+	})
+	if err != nil {
+		diagnostic(stderr, "text", err)
+		return 1
+	}
+	profilePath, err := doctor.DefaultProfilePath()
+	if err != nil {
+		diagnostic(stderr, "text", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Codex catalog: %s\n", result.CatalogPath)
+	fmt.Fprintf(stdout, "Codex version: %s\n", result.CodexVersion)
+	fmt.Fprintf(stdout, "Model:         %s\n\n", result.ModelAlias)
+	for _, message := range result.Warnings {
+		fmt.Fprintf(stderr, "WARNING: %s\n", message)
+	}
+	fmt.Fprintf(stdout, "Save this profile as %s:\n\n%s\n", profilePath, result.TOML)
+	fmt.Fprintf(stdout, "Then run: codex --profile %s\n", codex.DefaultProfileName)
+	return 0
+}
+
+func runDoctor(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("bedrock-proxy doctor", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	configPath := flags.String("config", "", "path to YAML configuration")
+	client := flags.String("client", "", "client compatibility checks: codex")
+	model := flags.String("model", "", "configured model alias")
+	live := flags.Bool("live", false, "exercise a running proxy and AWS target")
+	if err := flags.Parse(args); err != nil {
+		diagnostic(stderr, "text", err)
+		return 2
+	}
+	if flags.NArg() != 0 {
+		diagnostic(stderr, "text", errors.New("doctor does not accept positional arguments"))
+		return 2
+	}
+	if *live && strings.TrimSpace(*client) == "" {
+		*client = "codex"
+	}
+	path, cfg, err := loadConfiguration(*configPath)
+	if err != nil {
+		diagnostic(stderr, "text", err)
+		return 1
+	}
+	result := doctor.Run(context.Background(), doctor.Options{
+		Config:      cfg,
+		ConfigPath:  path,
+		Client:      *client,
+		ModelAlias:  *model,
+		Live:        *live,
+		CodexRunner: codexCommandRunner,
+	})
+	for _, check := range result.Checks {
+		fmt.Fprintf(stdout, "%-7s %-28s [%s] %s\n", strings.ToUpper(string(check.Status)), check.Name, check.Category, check.Message)
+	}
+	if !result.OK() {
+		return 1
+	}
+	return 0
+}
+
+func loadConfiguration(value string) (string, config.Config, error) {
+	path := strings.TrimSpace(value)
+	if path == "" {
+		var err error
+		path, err = config.DefaultPath()
+		if err != nil {
+			return "", config.Config{}, err
+		}
+	}
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		return "", config.Config{}, err
+	}
+	return path, cfg, nil
 }
 
 func runProxy(args []string, stdout, stderr io.Writer) int {

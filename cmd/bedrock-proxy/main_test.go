@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -12,8 +13,50 @@ import (
 	"testing"
 
 	"github.com/gregasher/bedrock-local-proxy/internal/accounting"
+	"github.com/gregasher/bedrock-local-proxy/internal/codex"
 	"github.com/gregasher/bedrock-local-proxy/internal/config"
 )
+
+type mainCodexRunner struct{}
+
+func (mainCodexRunner) Run(_ context.Context, _ string, args ...string) ([]byte, []byte, error) {
+	if len(args) == 1 && args[0] == "--version" {
+		return []byte("codex-cli 0.142.5"), nil, nil
+	}
+	if len(args) >= 3 && args[0] == "debug" && args[1] == "models" && args[2] == "-c" {
+		return []byte(`{"models":[{"slug":"coding"}]}`), nil, nil
+	}
+	return []byte(`{"models":[{"slug":"bundled","base_instructions":"You are Codex, a coding agent based on GPT.\nFollow instructions.","model_messages":{"instructions_template":"You are Codex, a coding agent based on GPT.\nFollow instructions.","instructions_variables":{"personality_default":""}}}]}`), nil, nil
+}
+
+func TestConfigureCodexCommandWritesCatalogAndPrintsProfile(t *testing.T) {
+	oldRunner := codexCommandRunner
+	codexCommandRunner = mainCodexRunner{}
+	t.Cleanup(func() { codexCommandRunner = oldRunner })
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yaml")
+	configText := "version: 1\naws:\n  profile: offline\n  region: us-east-2\nmodels:\n  coding:\n    bedrock_model_id: custom\n    capabilities:\n      context_window: 1000\n      max_output_tokens: 128\n      input_modalities: [text]\n      reasoning:\n        supported: false\n      tools:\n        function_calling: true\n        parallel_calls: false\n"
+	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalogPath := filepath.Join(root, "catalog.json")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"configure", "codex", "--config", configPath, "--catalog", catalogPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(catalogPath); err != nil {
+		t.Fatal(err)
+	}
+	for _, wanted := range []string{"Codex version: 0.142.5", "model = \"coding\"", "wire_api = \"responses\"", "supports_standalone_web_search = false", "X-Bedrock-Proxy-Catalog"} {
+		if !strings.Contains(stdout.String(), wanted) {
+			t.Fatalf("output missing %q: %s", wanted, stdout.String())
+		}
+	}
+	metadata, aliases, err := codex.Inspect(catalogPath)
+	if err != nil || len(aliases) != 1 || aliases[0] != "coding" || metadata.CatalogHash == "" {
+		t.Fatalf("catalog metadata=%+v aliases=%v err=%v", metadata, aliases, err)
+	}
+}
 
 func TestVersionHonorsJSONFormatWithoutConfig(t *testing.T) {
 	var out, errOut bytes.Buffer

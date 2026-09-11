@@ -121,6 +121,124 @@ func TestLoadFileAcceptsOptionalReportingBlock(t *testing.T) {
 	}
 }
 
+func TestLoadFileAcceptsOmittedCapabilitiesForVersionOne(t *testing.T) {
+	cfg := validConfig()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("legacy version 1 config failed: %v", err)
+	}
+	if cfg.Models["coding"].Capabilities != nil {
+		t.Fatal("omitted capabilities were populated")
+	}
+}
+
+func TestCapabilityResolutionListsAllMissingExplicitMetadata(t *testing.T) {
+	contextWindow := int64(1000)
+	_, _, err := ResolveModelCapabilities(ModelConfig{BedrockModelID: "unknown", Capabilities: &CapabilityConfig{ContextWindow: &contextWindow}})
+	if err == nil {
+		t.Fatal("incomplete capabilities unexpectedly resolved")
+	}
+	for _, field := range []string{"max_output_tokens", "input_modalities", "reasoning.supported", "tools.function_calling", "tools.parallel_calls"} {
+		if !strings.Contains(err.Error(), field) {
+			t.Fatalf("error %q omitted %s", err, field)
+		}
+	}
+}
+
+func TestResolveModelCapabilitiesUsesExactProfileAndOverrides(t *testing.T) {
+	model := ModelConfig{
+		BedrockModelID: "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+		Capabilities:   &CapabilityConfig{},
+	}
+	resolved, warnings, err := ResolveModelCapabilities(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || resolved.MetadataProfile != "anthropic.claude-sonnet-4-5-20250929-v1:0" {
+		t.Fatalf("profile resolution = %+v warnings=%v", resolved, warnings)
+	}
+	if resolved.ContextWindow != 200000 || resolved.MaxOutputTokens != 64000 || !resolved.FunctionCalling || !resolved.ParallelCalls {
+		t.Fatalf("resolved capabilities = %+v", resolved)
+	}
+}
+
+func TestResolveModelCapabilitiesValidatesCompleteExplicitMetadata(t *testing.T) {
+	model := ModelConfig{
+		BedrockModelID: "custom-target",
+		Capabilities: &CapabilityConfig{
+			ContextWindow:   int64Pointer(100000),
+			MaxOutputTokens: int64Pointer(32000),
+			InputModalities: []string{"text"},
+			Reasoning: ReasoningCapability{
+				Supported: boolPointer(true),
+				Efforts:   []string{"low", "medium", "high"},
+			},
+			Tools: ToolCapability{
+				FunctionCalling: boolPointer(true),
+				ParallelCalls:   boolPointer(false),
+			},
+		},
+	}
+	resolved, warnings, err := ResolveModelCapabilities(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || !resolved.ReasoningSupported || len(resolved.ReasoningEfforts) != 3 {
+		t.Fatalf("resolved capabilities = %+v warnings=%v", resolved, warnings)
+	}
+}
+
+func TestResolveModelCapabilitiesRejectsUnsafeCombinations(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		value CapabilityConfig
+		want  string
+	}{
+		{name: "missing limits", value: CapabilityConfig{InputModalities: []string{"text"}}, want: "context_window"},
+		{name: "output exceeds context", value: CapabilityConfig{ContextWindow: int64Pointer(10), MaxOutputTokens: int64Pointer(11), InputModalities: []string{"text"}}, want: "must not exceed"},
+		{name: "unsupported modality", value: CapabilityConfig{ContextWindow: int64Pointer(10), MaxOutputTokens: int64Pointer(5), InputModalities: []string{"audio"}}, want: "unsupported input modality"},
+		{name: "reasoning efforts while disabled", value: CapabilityConfig{ContextWindow: int64Pointer(10), MaxOutputTokens: int64Pointer(5), InputModalities: []string{"text"}, Reasoning: ReasoningCapability{Supported: boolPointer(false), Efforts: []string{"high"}}}, want: "require reasoning.supported"},
+		{name: "parallel without tools", value: CapabilityConfig{ContextWindow: int64Pointer(10), MaxOutputTokens: int64Pointer(5), InputModalities: []string{"text"}, Tools: ToolCapability{ParallelCalls: boolPointer(true)}}, want: "requires tools.function_calling"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := ResolveModelCapabilities(ModelConfig{BedrockModelID: "custom", Capabilities: &tt.value})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsRequestDefaultAboveCapabilityLimit(t *testing.T) {
+	cfg := validConfig()
+	max := 101
+	cfg.Models["coding"] = ModelConfig{
+		BedrockModelID: "custom",
+		MaxTokens:      &max,
+		Capabilities: &CapabilityConfig{
+			ContextWindow:   int64Pointer(1000),
+			MaxOutputTokens: int64Pointer(100),
+			InputModalities: []string{"text"},
+		},
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "must not exceed") {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestValidateRejectsNonpositiveRequestDefaultWithCapabilities(t *testing.T) {
+	value := 0
+	cfg := validConfig()
+	model := ModelConfig{
+		BedrockModelID: "anthropic.claude-sonnet-4-5-20250929-v1:0",
+		MaxTokens:      &value,
+		Capabilities:   &CapabilityConfig{},
+	}
+	cfg.Models["coding"] = model
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "positive integer") {
+		t.Fatalf("max_tokens=%d Validate() error = %v", value, err)
+	}
+}
+
 func TestValidateRejectsNonLoopbackAndInvalidValues(t *testing.T) {
 	tests := []struct {
 		name string
@@ -177,3 +295,6 @@ func TestLoadFileRejectsUnknownAndDuplicateFields(t *testing.T) {
 		}
 	}
 }
+
+func boolPointer(value bool) *bool    { return &value }
+func int64Pointer(value int64) *int64 { return &value }

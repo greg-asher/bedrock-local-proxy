@@ -26,50 +26,61 @@ type Options struct {
 
 // Report is the portable, metadata-only summary for a selected period.
 type Report struct {
-	GeneratedAt     string      `json:"generated_at"`
-	ReportDirectory string      `json:"report_directory"`
-	Start           string      `json:"start"`
-	Stop            string      `json:"stop"`
-	Sessions        int         `json:"sessions"`
-	SkippedSessions int         `json:"skipped_sessions"`
-	Metrics         Metrics     `json:"metrics"`
-	Series          []Point     `json:"series"`
-	Models          []Breakdown `json:"models"`
-	Endpoints       []Breakdown `json:"endpoints"`
-	SessionTags     []Breakdown `json:"session_tags"`
+	GeneratedAt      string      `json:"generated_at"`
+	ReportDirectory  string      `json:"report_directory"`
+	Start            string      `json:"start"`
+	Stop             string      `json:"stop"`
+	Sessions         int         `json:"sessions"`
+	SkippedSessions  int         `json:"skipped_sessions"`
+	Metrics          Metrics     `json:"metrics"`
+	Series           []Point     `json:"series"`
+	Models           []Breakdown `json:"models"`
+	Endpoints        []Breakdown `json:"endpoints"`
+	SessionTags      []Breakdown `json:"session_tags"`
+	Clients          []Breakdown `json:"clients"`
+	MetadataProfiles []Breakdown `json:"metadata_profiles"`
+	Catalogs         []Breakdown `json:"catalogs"`
 }
 
 type Metrics struct {
-	Requests             int     `json:"requests"`
-	Successes            int     `json:"successes"`
-	Failures             int     `json:"failures"`
-	Canceled             int     `json:"canceled"`
-	ModelListEvents      int     `json:"model_list_events"`
-	KnownInputTokens     int64   `json:"known_input_tokens"`
-	KnownOutputTokens    int64   `json:"known_output_tokens"`
-	KnownEstimatedCost   float64 `json:"known_estimated_cost"`
-	MissingUsageRequests int     `json:"missing_usage_requests"`
-	MissingCostRequests  int     `json:"missing_cost_requests"`
+	Requests                     int     `json:"requests"`
+	Successes                    int     `json:"successes"`
+	Failures                     int     `json:"failures"`
+	Canceled                     int     `json:"canceled"`
+	ModelListEvents              int     `json:"model_list_events"`
+	KnownInputTokens             int64   `json:"known_input_tokens"`
+	KnownOutputTokens            int64   `json:"known_output_tokens"`
+	KnownEstimatedCost           float64 `json:"known_estimated_cost"`
+	MissingUsageRequests         int     `json:"missing_usage_requests"`
+	MissingCostRequests          int     `json:"missing_cost_requests"`
+	FunctionToolCalls            int     `json:"function_tool_calls"`
+	UnsupportedFeatureRejections int     `json:"unsupported_feature_rejections"`
+	AverageContextUtilization    float64 `json:"average_context_utilization"`
+	AverageOutputUtilization     float64 `json:"average_output_utilization"`
 }
 
 type Point struct {
-	Start              string  `json:"start"`
-	Requests           int     `json:"requests"`
-	Successes          int     `json:"successes"`
-	Failures           int     `json:"failures"`
-	Canceled           int     `json:"canceled"`
-	KnownEstimatedCost float64 `json:"known_estimated_cost"`
+	Start                        string  `json:"start"`
+	Requests                     int     `json:"requests"`
+	Successes                    int     `json:"successes"`
+	Failures                     int     `json:"failures"`
+	Canceled                     int     `json:"canceled"`
+	KnownEstimatedCost           float64 `json:"known_estimated_cost"`
+	FunctionToolCalls            int     `json:"function_tool_calls"`
+	UnsupportedFeatureRejections int     `json:"unsupported_feature_rejections"`
 }
 
 type Breakdown struct {
-	Name               string  `json:"name"`
-	Requests           int     `json:"requests"`
-	Successes          int     `json:"successes"`
-	Failures           int     `json:"failures"`
-	Canceled           int     `json:"canceled"`
-	KnownInputTokens   int64   `json:"known_input_tokens"`
-	KnownOutputTokens  int64   `json:"known_output_tokens"`
-	KnownEstimatedCost float64 `json:"known_estimated_cost"`
+	Name                         string  `json:"name"`
+	Requests                     int     `json:"requests"`
+	Successes                    int     `json:"successes"`
+	Failures                     int     `json:"failures"`
+	Canceled                     int     `json:"canceled"`
+	KnownInputTokens             int64   `json:"known_input_tokens"`
+	KnownOutputTokens            int64   `json:"known_output_tokens"`
+	KnownEstimatedCost           float64 `json:"known_estimated_cost"`
+	FunctionToolCalls            int     `json:"function_tool_calls"`
+	UnsupportedFeatureRejections int     `json:"unsupported_feature_rejections"`
 }
 
 type manifest struct {
@@ -79,17 +90,26 @@ type manifest struct {
 }
 
 type event struct {
-	Event         string   `json:"event"`
-	Timestamp     string   `json:"timestamp"`
-	SessionTag    string   `json:"session_tag"`
-	Endpoint      string   `json:"endpoint"`
-	LocalModel    string   `json:"local_model"`
-	Outcome       string   `json:"outcome"`
-	InputTokens   *int64   `json:"input_tokens"`
-	OutputTokens  *int64   `json:"output_tokens"`
-	EstimatedCost *float64 `json:"estimated_cost"`
-	UsageStatus   string   `json:"usage_status"`
-	CostStatus    string   `json:"cost_status"`
+	Event                        string   `json:"event"`
+	Timestamp                    string   `json:"timestamp"`
+	SessionTag                   string   `json:"session_tag"`
+	Endpoint                     string   `json:"endpoint"`
+	LocalModel                   string   `json:"local_model"`
+	Outcome                      string   `json:"outcome"`
+	InputTokens                  *int64   `json:"input_tokens"`
+	OutputTokens                 *int64   `json:"output_tokens"`
+	EstimatedCost                *float64 `json:"estimated_cost"`
+	UsageStatus                  string   `json:"usage_status"`
+	CostStatus                   string   `json:"cost_status"`
+	ClientFamily                 string   `json:"client_family"`
+	ClientVersion                string   `json:"client_version"`
+	MetadataProfile              string   `json:"metadata_profile"`
+	MetadataRevision             string   `json:"metadata_revision"`
+	CatalogHash                  string   `json:"catalog_hash"`
+	ContextUtilization           *float64 `json:"context_utilization"`
+	OutputUtilization            *float64 `json:"output_utilization"`
+	FunctionToolCalls            int      `json:"function_tool_calls"`
+	UnsupportedFeatureRejections int      `json:"unsupported_feature_rejections"`
 }
 
 // Generate reads recognized report directories and aggregates request events
@@ -117,6 +137,11 @@ func Generate(options Options) (Report, error) {
 	byModel := map[string]*Breakdown{}
 	byEndpoint := map[string]*Breakdown{}
 	byTag := map[string]*Breakdown{}
+	byClient := map[string]*Breakdown{}
+	byProfile := map[string]*Breakdown{}
+	byCatalog := map[string]*Breakdown{}
+	var contextTotal, outputTotal float64
+	var contextSamples, outputSamples int
 	contributingSessions := map[string]struct{}{}
 	bucketDuration := 24 * time.Hour
 	if options.Stop.Sub(options.Start) <= 48*time.Hour {
@@ -147,7 +172,7 @@ func Generate(options Options) (Report, error) {
 				continue
 			}
 			contributingSessions[entry.Name()] = struct{}{}
-			if item.Endpoint == "/v1/models" {
+			if strings.HasPrefix(item.Endpoint, "/v1/models") {
 				report.Metrics.ModelListEvents++
 				continue
 			}
@@ -162,6 +187,17 @@ func Generate(options Options) (Report, error) {
 			applyBreakdown(byModel, label(item.LocalModel, "unresolved model"), item)
 			applyBreakdown(byEndpoint, label(item.Endpoint, "unknown endpoint"), item)
 			applyBreakdown(byTag, label(item.SessionTag, "untagged"), item)
+			applyBreakdown(byClient, clientLabel(item), item)
+			applyBreakdown(byProfile, profileLabel(item), item)
+			applyBreakdown(byCatalog, label(item.CatalogHash, "no catalog marker"), item)
+			if item.ContextUtilization != nil {
+				contextTotal += *item.ContextUtilization
+				contextSamples++
+			}
+			if item.OutputUtilization != nil {
+				outputTotal += *item.OutputUtilization
+				outputSamples++
+			}
 		}
 	}
 	report.Sessions = len(contributingSessions)
@@ -169,6 +205,15 @@ func Generate(options Options) (Report, error) {
 	report.Models = orderedBreakdowns(byModel)
 	report.Endpoints = orderedBreakdowns(byEndpoint)
 	report.SessionTags = orderedBreakdowns(byTag)
+	report.Clients = orderedBreakdowns(byClient)
+	report.MetadataProfiles = orderedBreakdowns(byProfile)
+	report.Catalogs = orderedBreakdowns(byCatalog)
+	if contextSamples > 0 {
+		report.Metrics.AverageContextUtilization = contextTotal / float64(contextSamples)
+	}
+	if outputSamples > 0 {
+		report.Metrics.AverageOutputUtilization = outputTotal / float64(outputSamples)
+	}
 	return report, nil
 }
 
@@ -241,6 +286,8 @@ func applyMetrics(metrics *Metrics, item event) {
 	} else {
 		metrics.MissingCostRequests++
 	}
+	metrics.FunctionToolCalls += item.FunctionToolCalls
+	metrics.UnsupportedFeatureRejections += item.UnsupportedFeatureRejections
 }
 
 func applyPoint(point *Point, item event) {
@@ -257,6 +304,28 @@ func applyPoint(point *Point, item event) {
 	if item.EstimatedCost != nil {
 		point.KnownEstimatedCost += *item.EstimatedCost
 	}
+	point.FunctionToolCalls += item.FunctionToolCalls
+	point.UnsupportedFeatureRejections += item.UnsupportedFeatureRejections
+}
+
+func clientLabel(item event) string {
+	if strings.TrimSpace(item.ClientFamily) == "" {
+		return "unknown client"
+	}
+	if strings.TrimSpace(item.ClientVersion) == "" {
+		return item.ClientFamily
+	}
+	return item.ClientFamily + " " + item.ClientVersion
+}
+
+func profileLabel(item event) string {
+	if strings.TrimSpace(item.MetadataProfile) == "" {
+		return "explicit or legacy metadata"
+	}
+	if strings.TrimSpace(item.MetadataRevision) == "" {
+		return item.MetadataProfile
+	}
+	return item.MetadataProfile + " @ " + item.MetadataRevision
 }
 
 func applyBreakdown(values map[string]*Breakdown, name string, item event) {
@@ -284,6 +353,8 @@ func applyBreakdown(values map[string]*Breakdown, name string, item event) {
 	if item.EstimatedCost != nil {
 		value.KnownEstimatedCost += *item.EstimatedCost
 	}
+	value.FunctionToolCalls += item.FunctionToolCalls
+	value.UnsupportedFeatureRejections += item.UnsupportedFeatureRejections
 }
 
 func orderedPoints(values map[time.Time]*Point) []Point {
@@ -368,8 +439,8 @@ var htmlTemplate = template.Must(template.New("report").Parse(`<!doctype html>
 <html><head><meta charset="utf-8"><title>Bedrock Local Proxy report</title><style>
 body{font:15px system-ui,sans-serif;max-width:1120px;margin:32px auto;padding:0 20px;color:#18212f;background:#f7f8fa}h1,h2{color:#101827}.sub{color:#526070}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}.card,section{background:white;border:1px solid #dce1e8;border-radius:10px;padding:16px;margin:16px 0}.card b{font-size:24px;display:block}.charts{display:grid;grid-template-columns:1fr 1fr;gap:16px}.chart{height:220px;display:flex;align-items:end;gap:3px;border-bottom:1px solid #bac4d1;padding:0 4px}.bar{min-width:8px;flex:1;background:#3973b9;border-radius:3px 3px 0 0}.cost .bar{background:#17875b}table{border-collapse:collapse;width:100%;margin-top:8px}th,td{padding:8px;text-align:left;border-bottom:1px solid #e5e8ed}th{color:#526070;font-weight:600}@media(max-width:700px){.charts{grid-template-columns:1fr}}</style></head><body>
 <h1>Bedrock Local Proxy usage report</h1><p class="sub">{{.Report.Start}} to {{.Report.Stop}} UTC · generated {{.Report.GeneratedAt}}</p>
-<div class="cards"><div class="card"><span>Requests</span><b>{{.Report.Metrics.Requests}}</b></div><div class="card"><span>Success rate</span><b>{{.SuccessRate}}</b></div><div class="card"><span>Estimated cost</span><b>${{printf "%.4f" .Report.Metrics.KnownEstimatedCost}}</b></div><div class="card"><span>Tokens</span><b>{{.Report.Metrics.KnownInputTokens}} / {{.Report.Metrics.KnownOutputTokens}}</b><span>input / output</span></div><div class="card"><span>Sessions</span><b>{{.Report.Sessions}}</b></div></div>
+<div class="cards"><div class="card"><span>Requests</span><b>{{.Report.Metrics.Requests}}</b></div><div class="card"><span>Success rate</span><b>{{.SuccessRate}}</b></div><div class="card"><span>Estimated cost</span><b>${{printf "%.4f" .Report.Metrics.KnownEstimatedCost}}</b></div><div class="card"><span>Tokens</span><b>{{.Report.Metrics.KnownInputTokens}} / {{.Report.Metrics.KnownOutputTokens}}</b><span>input / output</span></div><div class="card"><span>Function calls</span><b>{{.Report.Metrics.FunctionToolCalls}}</b></div><div class="card"><span>Unsupported features</span><b>{{.Report.Metrics.UnsupportedFeatureRejections}}</b></div><div class="card"><span>Sessions</span><b>{{.Report.Sessions}}</b></div></div>
 <section><h2>Coverage</h2><p>{{.Report.Metrics.Successes}} successful · {{.Report.Metrics.Failures}} failed ({{.Report.Metrics.Canceled}} canceled) · {{.Report.Metrics.MissingUsageRequests}} requests without complete usage · {{.Report.Metrics.MissingCostRequests}} requests without an estimate · {{.Report.Metrics.ModelListEvents}} model-list events excluded from totals · {{.Report.SkippedSessions}} unreadable or unrecognized session directories skipped.</p></section>
 <div class="charts"><section><h2>Requests over time</h2><div class="chart">{{range .RequestBars}}<div class="bar" style="height:{{.Height}}px" title="{{.Label}}: {{.Value}}"></div>{{end}}</div></section><section><h2>Estimated cost over time</h2><div class="chart cost">{{range .CostBars}}<div class="bar" style="height:{{.Height}}px" title="{{.Label}}: {{.Value}}"></div>{{end}}</div></section></div>
-{{template "breakdown" .Report.Models}}<section><h2>Endpoint breakdown</h2>{{template "rows" .Report.Endpoints}}</section><section><h2>Session tag breakdown</h2>{{template "rows" .Report.SessionTags}}</section>
+{{template "breakdown" .Report.Models}}<section><h2>Endpoint breakdown</h2>{{template "rows" .Report.Endpoints}}</section><section><h2>Session tag breakdown</h2>{{template "rows" .Report.SessionTags}}</section><section><h2>Client compatibility breakdown</h2>{{template "rows" .Report.Clients}}</section><section><h2>Metadata profile breakdown</h2>{{template "rows" .Report.MetadataProfiles}}</section><section><h2>Catalog breakdown</h2>{{template "rows" .Report.Catalogs}}</section>
 </body></html>{{define "breakdown"}}<section><h2>Model breakdown</h2>{{template "rows" .}}</section>{{end}}{{define "rows"}}<table><thead><tr><th>Name</th><th>Requests</th><th>Successes</th><th>Failures</th><th>Input tokens</th><th>Output tokens</th><th>Estimated cost</th></tr></thead><tbody>{{range .}}<tr><td>{{.Name}}</td><td>{{.Requests}}</td><td>{{.Successes}}</td><td>{{.Failures}}</td><td>{{.KnownInputTokens}}</td><td>{{.KnownOutputTokens}}</td><td>${{printf "%.6f" .KnownEstimatedCost}}</td></tr>{{else}}<tr><td colspan="7">No generation requests in this period.</td></tr>{{end}}</tbody></table>{{end}}`))

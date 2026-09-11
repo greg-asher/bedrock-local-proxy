@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gregasher/bedrock-local-proxy/internal/config"
 	"github.com/gregasher/bedrock-local-proxy/internal/transport"
 )
 
@@ -124,13 +126,213 @@ func TestResponsesValidationAndTransportErrorsUseOpenAIShape(t *testing.T) {
 	})
 
 	t.Run("expired credentials", func(t *testing.T) {
-		s := NewWithTransport(chatTestConfig(), &fakeRequestDoer{err: &transport.Failure{Class: transport.FailureCredentialsExpired}})
+		cfg := chatTestConfig()
+		cfg.Models["coding"] = responseCapabilityModel()
+		s := NewWithTransport(cfg, &fakeRequestDoer{err: &transport.Failure{Class: transport.FailureCredentialsExpired}})
+		var result CompletionResult
+		s.SetCompletionRecorder(func(got CompletionResult) { result = got })
 		recorder := httptest.NewRecorder()
-		s.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"coding","input":"hello"}`)))
+		request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"coding","input":"hello"}`))
+		request.Header.Set("User-Agent", "codex_cli_rs/0.142.5")
+		request.Header.Set("X-Bedrock-Proxy-Catalog", strings.Repeat("a", 64))
+		s.ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusUnauthorized || !strings.Contains(recorder.Body.String(), "aws sso login --profile YOUR_AWS_PROFILE") {
 			t.Fatalf("response = (%d, %q), want actionable expired-profile error", recorder.Code, recorder.Body.String())
 		}
+		if result.ClientFamily != "codex" || result.ClientVersion != "0.142.5" || result.CatalogHash != strings.Repeat("a", 64) || result.ContextWindow != 1000 || result.MaxOutputTokens != 128 {
+			t.Fatalf("transport failure lost compatibility metadata: %+v", result)
+		}
 	})
+}
+
+func TestResponsesRejectsHostedToolsBeforeAWS(t *testing.T) {
+	for _, toolType := range []string{"web_search", "web_search_preview", "file_search", "code_interpreter", "computer", "computer_use", "image_generation", "mcp", "tool_search"} {
+		t.Run(toolType, func(t *testing.T) {
+			fake := &fakeRequestDoer{}
+			s := NewWithTransport(chatTestConfig(), fake)
+			var result CompletionResult
+			s.SetCompletionRecorder(func(got CompletionResult) { result = got })
+			body := fmt.Sprintf(`{"model":"coding","input":"hello","tools":[{"type":%q}]}`, toolType)
+			recorder := httptest.NewRecorder()
+			s.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+			if recorder.Code != http.StatusBadRequest || fake.request != nil {
+				t.Fatalf("status=%d upstream=%v", recorder.Code, fake.request)
+			}
+			var envelope openAIErrorEnvelope
+			if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if envelope.Error.Param != "tools" || envelope.Error.Code != "unsupported_hosted_tool" || !strings.Contains(envelope.Error.Message, "MCP") {
+				t.Fatalf("error = %+v", envelope.Error)
+			}
+			if result.UnsupportedFeatureRejections != 1 {
+				t.Fatalf("completion result = %+v", result)
+			}
+		})
+	}
+}
+
+func TestResponsesEnforcesDeclaredCapabilitiesAndPreservesFunctionTools(t *testing.T) {
+	cfg := chatTestConfig()
+	cfg.Models["coding"] = responseCapabilityModel()
+
+	for _, test := range []struct {
+		name string
+		body string
+		code string
+	}{
+		{"output ceiling", `{"model":"coding","input":"x","max_output_tokens":129}`, "max_output_tokens_exceeded"},
+		{"reasoning", `{"model":"coding","input":"x","reasoning":{"effort":"high"}}`, "unsupported_reasoning"},
+		{"parallel calls", `{"model":"coding","input":"x","parallel_tool_calls":true}`, "unsupported_parallel_tool_calls"},
+		{"image input", `{"model":"coding","input":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}]}`, "unsupported_input_modality"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeRequestDoer{}
+			s := NewWithTransport(cfg, fake)
+			recorder := httptest.NewRecorder()
+			s.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(test.body)))
+			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), test.code) || fake.request != nil {
+				t.Fatalf("response=(%d,%s) upstream=%v", recorder.Code, recorder.Body.String(), fake.request)
+			}
+		})
+	}
+	t.Run("reasoning effort", func(t *testing.T) {
+		model := cfg.Models["coding"]
+		reasoning := true
+		model.Capabilities.Reasoning = config.ReasoningCapability{Supported: &reasoning, Efforts: []string{"low"}}
+		cfg.Models["coding"] = model
+		fake := &fakeRequestDoer{}
+		s := NewWithTransport(cfg, fake)
+		recorder := httptest.NewRecorder()
+		s.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"coding","input":"x","reasoning":{"effort":"high"}}`)))
+		if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "unsupported_reasoning_effort") || fake.request != nil {
+			t.Fatalf("response=(%d,%s) upstream=%v", recorder.Code, recorder.Body.String(), fake.request)
+		}
+	})
+
+	responseBody := `{"id":"resp_tool","status":"completed","output":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"value\":1}"}],"usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14}}`
+	fake := &fakeRequestDoer{response: &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(responseBody))}}
+	s := NewWithTransport(cfg, fake)
+	var result CompletionResult
+	s.SetCompletionRecorder(func(got CompletionResult) { result = got })
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"coding","input":[{"type":"function_call_output","call_id":"call_1","output":"safe"}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}`))
+	request.Header.Set("User-Agent", "codex_cli_rs/0.142.5")
+	request.Header.Set("X-Bedrock-Proxy-Catalog", strings.Repeat("a", 64))
+	recorder := httptest.NewRecorder()
+	s.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || recorder.Body.String() != responseBody {
+		t.Fatalf("response=(%d,%s)", recorder.Code, recorder.Body.String())
+	}
+	if result.FunctionToolCalls != 1 || result.ClientFamily != "codex" || result.ClientVersion != "0.142.5" || result.CatalogHash != strings.Repeat("a", 64) || result.ContextWindow != 1000 || result.MaxOutputTokens != 128 {
+		t.Fatalf("completion metadata = %+v", result)
+	}
+	if fake.request.Header.Get("X-Bedrock-Proxy-Catalog") != "" {
+		t.Fatal("proxy catalog marker reached AWS transport")
+	}
+	upstream, _ := io.ReadAll(fake.request.Body)
+	if !strings.Contains(string(upstream), "function_call_output") || !strings.Contains(string(upstream), `"name":"lookup"`) {
+		t.Fatalf("function loop fields changed: %s", upstream)
+	}
+}
+
+func TestResponsesPreservesParallelFunctionCallShapes(t *testing.T) {
+	cfg := chatTestConfig()
+	model := responseCapabilityModel()
+	parallel := true
+	model.Capabilities.Tools.ParallelCalls = &parallel
+	cfg.Models["coding"] = model
+	responseBody := `{"id":"resp_parallel","status":"completed","output":[{"type":"function_call","call_id":"call_1","name":"left","arguments":"{}"},{"type":"function_call","call_id":"call_2","name":"right","arguments":"{}"}],"usage":{"input_tokens":10,"output_tokens":8,"total_tokens":18}}`
+	fake := &fakeRequestDoer{response: &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(responseBody))}}
+	s := NewWithTransport(cfg, fake)
+	var result CompletionResult
+	s.SetCompletionRecorder(func(got CompletionResult) { result = got })
+	recorder := httptest.NewRecorder()
+	s.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"coding","input":"run both","parallel_tool_calls":true,"tools":[{"type":"function","name":"left","parameters":{"type":"object"}},{"type":"function","name":"right","parameters":{"type":"object"}}]}`)))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != responseBody || result.FunctionToolCalls != 2 {
+		t.Fatalf("response=(%d,%s) result=%+v", recorder.Code, recorder.Body.String(), result)
+	}
+	upstream, _ := io.ReadAll(fake.request.Body)
+	if !strings.Contains(string(upstream), `"parallel_tool_calls":true`) || !strings.Contains(string(upstream), `"name":"left"`) || !strings.Contains(string(upstream), `"name":"right"`) {
+		t.Fatalf("parallel function request changed: %s", upstream)
+	}
+}
+
+func TestResponsesPreservesCodexMCPNamespaceShapes(t *testing.T) {
+	cfg := chatTestConfig()
+	cfg.Models["coding"] = responseCapabilityModel()
+	responseBody := `{"id":"resp_mcp","status":"completed","output":[{"type":"function_call","call_id":"call_1","namespace":"mcp__search","name":"query","arguments":"{\"query\":\"marker\"}"}],"usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14}}`
+	fake := &fakeRequestDoer{response: &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(responseBody))}}
+	s := NewWithTransport(cfg, fake)
+	var result CompletionResult
+	s.SetCompletionRecorder(func(got CompletionResult) { result = got })
+	requestBody := `{"model":"coding","input":[{"type":"function_call","call_id":"call_1","namespace":"mcp__search","name":"query","arguments":"{\"query\":\"marker\"}"},{"type":"function_call_output","call_id":"call_1","output":[{"type":"text","text":"result"}]}],"tools":[{"type":"namespace","name":"mcp__search","description":"Search tools","tools":[{"type":"function","name":"query","description":"Search","parameters":{"type":"object"}}]}]}`
+	recorder := httptest.NewRecorder()
+	s.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(requestBody)))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != responseBody || result.FunctionToolCalls != 1 {
+		t.Fatalf("response=(%d,%s) result=%+v", recorder.Code, recorder.Body.String(), result)
+	}
+	upstream, _ := io.ReadAll(fake.request.Body)
+	for _, field := range []string{`"type":"namespace"`, `"namespace":"mcp__search"`, `"type":"function_call_output"`} {
+		if !strings.Contains(string(upstream), field) {
+			t.Fatalf("Codex MCP namespace field %s changed: %s", field, upstream)
+		}
+	}
+}
+
+func TestResponsesRejectsHostedToolsNestedInNamespace(t *testing.T) {
+	fake := &fakeRequestDoer{}
+	s := NewWithTransport(chatTestConfig(), fake)
+	recorder := httptest.NewRecorder()
+	body := `{"model":"coding","input":"hello","tools":[{"type":"namespace","name":"unsafe","tools":[{"type":"web_search"}]}]}`
+	s.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "unsupported_hosted_tool") || fake.request != nil {
+		t.Fatalf("response=(%d,%s) upstream=%v", recorder.Code, recorder.Body.String(), fake.request)
+	}
+}
+
+func TestResponsesDoesNotPersistArbitraryHeaderValues(t *testing.T) {
+	s := NewWithTransport(chatTestConfig(), &fakeRequestDoer{})
+	var result CompletionResult
+	s.SetCompletionRecorder(func(got CompletionResult) { result = got })
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"coding","input":"x","tools":[{"type":"web_search"}]}`))
+	request.Header.Set("User-Agent", "codex_cli_rs/prompt-secret")
+	request.Header.Set("X-Bedrock-Proxy-Catalog", "header-secret")
+	recorder := httptest.NewRecorder()
+	s.ServeHTTP(recorder, request)
+	if result.ClientFamily != "codex" || result.ClientVersion != "" || result.CatalogHash != "" {
+		t.Fatalf("untrusted header values reached completion metadata: %+v", result)
+	}
+}
+
+func responseCapabilityModel() config.ModelConfig {
+	functionCalling, parallel, reasoning := true, false, false
+	contextWindow, maxOutput := int64(1000), int64(128)
+	return config.ModelConfig{
+		BedrockModelID: "custom-target",
+		MaxTokens:      intPtr(64),
+		Capabilities: &config.CapabilityConfig{
+			ContextWindow:   &contextWindow,
+			MaxOutputTokens: &maxOutput,
+			InputModalities: []string{"text"},
+			Reasoning:       config.ReasoningCapability{Supported: &reasoning},
+			Tools:           config.ToolCapability{FunctionCalling: &functionCalling, ParallelCalls: &parallel},
+		},
+	}
+}
+
+func TestResponsesRejectsInvalidConfiguredRequestDefaultBeforeTransport(t *testing.T) {
+	cfg := chatTestConfig()
+	model := responseCapabilityModel()
+	zero := 0
+	model.MaxTokens = &zero
+	cfg.Models["coding"] = model
+	fake := &fakeRequestDoer{}
+	s := NewWithTransport(cfg, fake)
+	recorder := httptest.NewRecorder()
+	s.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"coding","input":"hello"}`)))
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "invalid_max_output_tokens") || fake.request != nil {
+		t.Fatalf("response=(%d,%s) upstream=%v", recorder.Code, recorder.Body.String(), fake.request)
+	}
 }
 
 func TestResponsesStreamingPreservesRealSSEAndUsesTerminalUsage(t *testing.T) {

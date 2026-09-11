@@ -4,15 +4,19 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gregasher/bedrock-local-proxy/internal/config"
 	"github.com/gregasher/bedrock-local-proxy/internal/transport"
 )
+
+var modelCreatedUnix = time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC).Unix()
 
 type Server struct {
 	cfg                config.Config
@@ -169,12 +173,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveMessages(w, r)
 		return
 	}
-	if r.URL.Path != "/v1/models" {
-		status := http.StatusNotFound
-		http.NotFound(w, r)
-		s.finishCompletion(started, CompletionResult{Endpoint: r.URL.Path, HTTPStatus: &status, Outcome: CompletionFailed})
+	if r.URL.Path == "/v1/models" {
+		s.serveModelList(w, r, started)
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, "/v1/models/") {
+		s.serveModel(w, r, started, strings.TrimPrefix(r.URL.Path, "/v1/models/"))
+		return
+	}
+	status := http.StatusNotFound
+	http.NotFound(w, r)
+	s.finishCompletion(started, CompletionResult{Endpoint: r.URL.Path, HTTPStatus: &status, Outcome: CompletionFailed})
+}
+
+func (s *Server) serveModelList(w http.ResponseWriter, r *http.Request, started time.Time) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -189,7 +201,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(names)
 	data := make([]modelRecord, 0, len(names))
 	for _, name := range names {
-		data = append(data, modelRecord{ID: name, Object: "model", Owner: "bedrock-local-proxy"})
+		data = append(data, modelRecord{ID: name, Object: "model", Created: modelCreatedUnix, Owner: "bedrock-local-proxy"})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	status := http.StatusOK
@@ -198,6 +210,36 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		outcome = CompletionFailed
 	}
 	s.finishCompletion(started, CompletionResult{Endpoint: "/v1/models", HTTPStatus: &status, Outcome: outcome})
+}
+
+func (s *Server) serveModel(w http.ResponseWriter, r *http.Request, started time.Time, alias string) {
+	endpoint := "/v1/models/" + alias
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		status := http.StatusMethodNotAllowed
+		w.WriteHeader(status)
+		s.finishCompletion(started, CompletionResult{Endpoint: endpoint, LocalModel: alias, HTTPStatus: &status, Outcome: CompletionFailed})
+		return
+	}
+	if alias == "" {
+		status := http.StatusNotFound
+		s.writeOpenAIErrorDetails(w, status, "model not found", "invalid_request_error", "model", "model_not_found")
+		s.finishCompletion(started, CompletionResult{Endpoint: endpoint, HTTPStatus: &status, Outcome: CompletionFailed})
+		return
+	}
+	if _, ok := s.cfg.Models[alias]; !ok {
+		status := http.StatusNotFound
+		s.writeOpenAIErrorDetails(w, status, fmt.Sprintf("model %q not found", alias), "invalid_request_error", "model", "model_not_found")
+		s.finishCompletion(started, CompletionResult{Endpoint: endpoint, LocalModel: alias, HTTPStatus: &status, Outcome: CompletionFailed})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	status := http.StatusOK
+	outcome := CompletionSucceeded
+	if err := json.NewEncoder(w).Encode(modelRecord{ID: alias, Object: "model", Created: modelCreatedUnix, Owner: "bedrock-local-proxy"}); err != nil {
+		outcome = CompletionFailed
+	}
+	s.finishCompletion(started, CompletionResult{Endpoint: endpoint, LocalModel: alias, HTTPStatus: &status, Outcome: outcome})
 }
 
 func (s *Server) beginRequest(r *http.Request) (uint64, context.Context, bool) {
