@@ -10,7 +10,7 @@ Provide a small repository-root `install.sh` that builds the current source for 
 
 Create `~/.config/bedrock-proxy/config.yaml` from the example owned by issue 01 only when the file does not already exist. Include the actual AWS profile and region and an obvious model-ID placeholder for the developer to replace. Preserve existing configuration on every subsequent install. Do not start the proxy with a placeholder model or claim AWS connectivity has been checked.
 
-Finish with a short next-steps message: edit the displayed config path to supply a model ID, show `aws sso login --profile Halo-Win-Agent-Execution` for the newly generated example, or tell users with existing configuration to use its profile name, then run `bedrock-proxy`. If `~/.local/bin` is absent from PATH, show the shell command to add it; do not edit shell startup files. Keep the installed absolute binary path usable immediately.
+Finish with a short next-steps message: edit the displayed config path to supply a model ID, show `aws sso login --profile YOUR_AWS_PROFILE` for the newly generated example, or tell users with existing configuration to use its profile name, then run `bedrock-proxy`. If `~/.local/bin` is absent from PATH, show the shell command to add it; do not edit shell startup files. Keep the installed absolute binary path usable immediately.
 
 Document the first-use sequence as checkout, `./install.sh`, edit configuration, SSO login, start proxy, and configure the client. Re-running the script is the update workflow. Build the current host only during installation; retain simple cross-build checks for the four supported targets without making the developer build all four.
 

@@ -2,7 +2,7 @@
 
 Each issue appears in exactly one state. Ready means no unresolved issue prerequisite. Move an issue to Ready only when its listed prerequisites are Done. Implemented means code is present but review or required verification remains; Done means its completion criteria passed.
 
-Delivery basis: [Product Brief](../bedrock-local-proxy-product-brief.docx), unchanged, plus the user’s clarifications: actual profile `Halo-Win-Agent-Execution`, region `us-east-2`, user-maintained model IDs, Pi acceptance, and Anthropic Messages for Claude Code. Local implementation and deterministic contract validation are in progress; live AWS, Pi, and Claude Code validation remains deferred to the AWS-enabled test machine.
+Delivery basis: [Product Brief](../bedrock-local-proxy-product-brief.docx), unchanged, plus the user’s clarifications: actual profile `YOUR_AWS_PROFILE`, region `us-east-2`, user-maintained model IDs, Pi acceptance, and Anthropic Messages for Claude Code. Local implementation and deterministic contract validation are in progress; live AWS, Pi, and Claude Code validation remains deferred to the AWS-enabled test machine.
 
 Local implementation and deterministic contract tests must not require AWS credentials, model access, or network access. Issues 01–08 and 11 can be built and reviewed locally with fake credentials/providers and fake upstreams, but those fakes must use the real AWS, OpenAI, Anthropic, Pi, and Claude Code wire shapes. Issues 09 and 10 contain live-client gates that remain externally blocked until this repository is moved to the AWS-enabled test machine; that external gate does not block local implementation.
 

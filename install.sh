@@ -88,10 +88,10 @@ esac
 
 printf '%s\n' "Next steps:"
 if [ "$config_created" -eq 1 ]; then
-	printf '%s\n' "  1. Edit $config_path and replace REPLACE_WITH_YOUR_BEDROCK_MODEL_ID."
-	printf '%s\n' "  2. Sign in with: aws sso login --profile Halo-Win-Agent-Execution"
+	printf '%s\n' "  1. Edit $config_path and replace YOUR_AWS_PROFILE and REPLACE_WITH_YOUR_BEDROCK_MODEL_ID."
+	printf '%s\n' "  2. Sign in with: aws sso login --profile YOUR_AWS_PROFILE"
 else
 	printf '%s\n' "  1. Check $config_path for its configured model and AWS profile."
-	printf '%s\n' "  2. Sign in with: aws sso login --profile <configured-profile>"
+	printf '%s\n' "  2. Sign in with: aws sso login --profile YOUR_AWS_PROFILE"
 fi
 printf '%s\n' "  3. Run: bedrock-proxy"

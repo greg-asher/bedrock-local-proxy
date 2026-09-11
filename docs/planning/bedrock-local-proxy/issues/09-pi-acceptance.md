@@ -8,7 +8,7 @@ A developer uses Pi for a real coding task with only a local API URL, dummy key,
 
 Use `./install.sh` to build and install the current source before the live check, following issue 11’s local setup instructions.
 
-Document the tested Pi version and its actual provider/model configuration. Run against the developer-configured model using profile Halo-Win-Agent-Execution in us-east-2. The developer performs AWS SSO login and updates model IDs; do not provision IAM or change their model choices.
+Document the tested Pi version and its actual provider/model configuration. Run against the developer-configured model using profile YOUR_AWS_PROFILE in us-east-2. The developer performs AWS SSO login and updates model IDs; do not provision IAM or change their model choices.
 
 In a disposable repository, have Pi inspect a file, perform an edit using tools, and verify the result. Observe streamed output, metadata-only logs, usage when upstream provides it, and estimated cost when configured. Cancel a second generation and verify proxy-side cancellation, then exit and reconcile the session summary.
 
@@ -16,7 +16,7 @@ Exercise each OpenAI endpoint against a configured target where supported. If Re
 
 ## Requirements and delivery context
 
-Authority: [Product Brief](../bedrock-local-proxy-product-brief.docx), plus the user’s clarifications: use actual profile `Halo-Win-Agent-Execution` and region `us-east-2`; the user supplies model IDs in YAML; Pi is the primary acceptance client; add Anthropic Messages for Claude Code. Keep profile, region, targets, and prices configurable. No exact model ID is required for implementation tests. Never log prompts, responses, tool content, credentials, or raw sensitive headers. The product remains a localhost-only Go executable with no hosted infrastructure.
+Authority: [Product Brief](../bedrock-local-proxy-product-brief.docx), plus the user’s clarifications: use actual profile `YOUR_AWS_PROFILE` and region `us-east-2`; the user supplies model IDs in YAML; Pi is the primary acceptance client; add Anthropic Messages for Claude Code. Keep profile, region, targets, and prices configurable. No exact model ID is required for implementation tests. Never log prompts, responses, tool content, credentials, or raw sensitive headers. The product remains a localhost-only Go executable with no hosted infrastructure.
 
 Brief section 22; user selects Pi, not OpenCode, for full acceptance. This is the live integration gate. Missing AWS session, client installation, or usable model configuration blocks this issue, not earlier implementation. Credential refresh/expiry fault behavior is established by controlled tests; report that separately from live SSO success. Local Pi fixtures and configuration checks must use Pi’s actual provider/model configuration and OpenAI-compatible request/stream shapes; do not substitute a bespoke test client.
 

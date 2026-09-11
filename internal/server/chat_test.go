@@ -26,7 +26,7 @@ func (f *fakeRequestDoer) Do(_ context.Context, request *http.Request) (*http.Re
 
 func chatTestConfig() config.Config {
 	return config.Config{
-		AWS: config.AWSConfig{Profile: "Halo-Win-Agent-Execution", Region: "us-east-2"},
+		AWS: config.AWSConfig{Profile: "YOUR_AWS_PROFILE", Region: "us-east-2"},
 		Models: map[string]config.ModelConfig{
 			"coding": {
 				BedrockModelID: "us.anthropic.claude-sonnet-test-v1:0",
@@ -195,7 +195,7 @@ func TestChatCompletionValidationAndTransportErrors(t *testing.T) {
 		s := NewWithTransport(chatTestConfig(), &fakeRequestDoer{err: &transport.Failure{Class: transport.FailureCredentialsExpired}})
 		recorder := httptest.NewRecorder()
 		s.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"coding","messages":[]}`)))
-		if recorder.Code != http.StatusUnauthorized || !strings.Contains(recorder.Body.String(), "aws sso login --profile Halo-Win-Agent-Execution") {
+		if recorder.Code != http.StatusUnauthorized || !strings.Contains(recorder.Body.String(), "aws sso login --profile YOUR_AWS_PROFILE") {
 			t.Fatalf("response = (%d, %q), want actionable expired-profile error", recorder.Code, recorder.Body.String())
 		}
 	})

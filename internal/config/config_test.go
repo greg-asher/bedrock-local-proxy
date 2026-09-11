@@ -11,7 +11,7 @@ import (
 func validConfig() Config {
 	return Config{
 		Version: 1,
-		AWS:     AWSConfig{Profile: "Halo-Win-Agent-Execution", Region: "us-east-2"},
+		AWS:     AWSConfig{Profile: "YOUR_AWS_PROFILE", Region: "us-east-2"},
 		Models: map[string]ModelConfig{
 			"coding": {BedrockModelID: "model-a"},
 			"fast":   {BedrockModelID: "model-a"},

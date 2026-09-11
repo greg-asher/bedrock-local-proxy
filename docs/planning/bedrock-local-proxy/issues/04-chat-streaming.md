@@ -14,7 +14,7 @@ Report completion once: normal terminal event, upstream rejection, cancellation,
 
 ## Requirements and delivery context
 
-Authority: [Product Brief](../bedrock-local-proxy-product-brief.docx), plus the user’s clarifications: use actual profile `Halo-Win-Agent-Execution` and region `us-east-2`; the user supplies model IDs in YAML; Pi is the primary acceptance client; add Anthropic Messages for Claude Code. Keep profile, region, targets, and prices configurable. No exact model ID is required for implementation tests. Never log prompts, responses, tool content, credentials, or raw sensitive headers. The product remains a localhost-only Go executable with no hosted infrastructure.
+Authority: [Product Brief](../bedrock-local-proxy-product-brief.docx), plus the user’s clarifications: use actual profile `YOUR_AWS_PROFILE` and region `us-east-2`; the user supplies model IDs in YAML; Pi is the primary acceptance client; add Anthropic Messages for Claude Code. Keep profile, region, targets, and prices configurable. No exact model ID is required for implementation tests. Never log prompts, responses, tool content, credentials, or raw sensitive headers. The product remains a localhost-only Go executable with no hosted infrastructure.
 
 Brief sections 10–12 and 22. This issue extends issue 03’s completion result and owns the reusable byte-relay and streaming completion lifecycle used by later protocols, plus the Chat Completions stream observer. Cancellation proves that the proxy stops its upstream request; do not claim it proves provider billing stopped. Streaming fixtures must use real OpenAI SSE event/data shapes, usage placement, keep-alives, and terminal markers.
 

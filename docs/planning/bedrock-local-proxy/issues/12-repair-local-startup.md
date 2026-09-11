@@ -10,7 +10,7 @@ Make `--version --log-format json` emit one valid JSON record while preserving p
 
 Add command-level tests for version output, default and explicit configuration paths, startup text and JSON, occupied-port failure, loopback rejection, and signal shutdown. Use temporary home/config directories and an ephemeral test port without touching the developer’s real configuration.
 
-Add concise repository startup instructions covering Go as the build prerequisite, `./install.sh` when issue 11 lands, `~/.config/bedrock-proxy/config.yaml`, `--config`, `aws sso login --profile Halo-Win-Agent-Execution`, and the localhost URL. Keep the model ID as a user-supplied placeholder. Explain that startup proves local binding only; AWS connectivity is proven by a later request.
+Add concise repository startup instructions covering Go as the build prerequisite, `./install.sh` when issue 11 lands, `~/.config/bedrock-proxy/config.yaml`, `--config`, `aws sso login --profile YOUR_AWS_PROFILE`, and the localhost URL. Keep the model ID as a user-supplied placeholder. Explain that startup proves local binding only; AWS connectivity is proven by a later request.
 
 ## Requirements and delivery context
 

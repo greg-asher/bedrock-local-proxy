@@ -14,7 +14,7 @@ Integrate both normal and streaming Messages outcomes with the shared completion
 
 ## Requirements and delivery context
 
-Authority: [Product Brief](../bedrock-local-proxy-product-brief.docx), plus the user’s clarifications: use actual profile `Halo-Win-Agent-Execution` and region `us-east-2`; the user supplies model IDs in YAML; Pi is the primary acceptance client; add Anthropic Messages for Claude Code. Keep profile, region, targets, and prices configurable. No exact model ID is required for implementation tests. Never log prompts, responses, tool content, credentials, or raw sensitive headers. The product remains a localhost-only Go executable with no hosted infrastructure.
+Authority: [Product Brief](../bedrock-local-proxy-product-brief.docx), plus the user’s clarifications: use actual profile `YOUR_AWS_PROFILE` and region `us-east-2`; the user supplies model IDs in YAML; Pi is the primary acceptance client; add Anthropic Messages for Claude Code. Keep profile, region, targets, and prices configurable. No exact model ID is required for implementation tests. Never log prompts, responses, tool content, credentials, or raw sensitive headers. The product remains a localhost-only Go executable with no hosted infrastructure.
 
 User addition plus brief sections 10–14. Issue 06 owns non-streaming Messages and headers; issue 04 owns the reusable relay. This dependency makes shared-code ownership explicit and avoids two agents inventing incompatible stream lifecycles. No token-counting endpoint or full Claude Code feature parity is implied. Synthetic streams must use real Anthropic SSE event names, data shapes, pings, usage placement, tool argument fragments, and terminal/error events expected by Claude Code.
 

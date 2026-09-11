@@ -1,7 +1,7 @@
 version: 1
 
 aws:
-  profile: Halo-Win-Agent-Execution
+  profile: YOUR_AWS_PROFILE
   region: us-east-2
 
 listen: 127.0.0.1:8787

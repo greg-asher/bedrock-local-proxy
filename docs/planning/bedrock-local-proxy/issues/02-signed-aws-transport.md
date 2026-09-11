@@ -14,7 +14,7 @@ Strip incoming Authorization, x-api-key, and AWS security/signature headers befo
 
 ## Requirements and delivery context
 
-Authority: [Product Brief](../bedrock-local-proxy-product-brief.docx), plus the user’s clarifications: use actual profile `Halo-Win-Agent-Execution` and region `us-east-2`; the user supplies model IDs in YAML; Pi is the primary acceptance client; add Anthropic Messages for Claude Code. Keep profile, region, targets, and prices configurable. No exact model ID is required for implementation tests. Never log prompts, responses, tool content, credentials, or raw sensitive headers. The product remains a localhost-only Go executable with no hosted infrastructure.
+Authority: [Product Brief](../bedrock-local-proxy-product-brief.docx), plus the user’s clarifications: use actual profile `YOUR_AWS_PROFILE` and region `us-east-2`; the user supplies model IDs in YAML; Pi is the primary acceptance client; add Anthropic Messages for Claude Code. Keep profile, region, targets, and prices configurable. No exact model ID is required for implementation tests. Never log prompts, responses, tool content, credentials, or raw sensitive headers. The product remains a localhost-only Go executable with no hosted infrastructure.
 
 Brief sections 8–11 and 19. This enabling component is shared by all three generation protocols. Issue 01 establishes the Go module and configuration types before this component is implemented. It does not depend on any generation handler. Keep test substitution internal, not a user-facing remote upstream feature. Classify expired SSO, unavailable credentials, signing failure, and connectivity failure. An upstream 403 alone is not proof of expired SSO.
 

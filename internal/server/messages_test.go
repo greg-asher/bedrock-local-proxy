@@ -141,7 +141,7 @@ func TestMessagesTransportErrorsUseAnthropicErrors(t *testing.T) {
 		s := NewWithTransport(chatTestConfig(), &fakeRequestDoer{err: &transport.Failure{Class: transport.FailureCredentialsExpired}})
 		recorder := httptest.NewRecorder()
 		s.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"coding","messages":[]}`)))
-		if recorder.Code != http.StatusUnauthorized || !strings.Contains(recorder.Body.String(), "aws sso login --profile Halo-Win-Agent-Execution") {
+		if recorder.Code != http.StatusUnauthorized || !strings.Contains(recorder.Body.String(), "aws sso login --profile YOUR_AWS_PROFILE") {
 			t.Fatalf("response = (%d, %q), want actionable expired-profile error", recorder.Code, recorder.Body.String())
 		}
 		var envelope anthropicErrorEnvelope

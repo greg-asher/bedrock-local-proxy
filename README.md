@@ -15,16 +15,16 @@ The proxy uses the AWS SDK credential chain. It does not ask for access keys and
 If the profile has not been configured on this machine, run:
 
 ```sh
-aws configure sso --profile Halo-Win-Agent-Execution
+aws configure sso --profile YOUR_AWS_PROFILE
 ```
 
-Follow the prompts in the terminal and browser. Use the IAM Identity Center start URL supplied by your administrator, the SSO region that hosts your organization’s Identity Center directory, the AWS account and permission set that may invoke Bedrock, and `Halo-Win-Agent-Execution` as the profile name. The SSO region is the directory’s region; it can be different from the Bedrock runtime region in the proxy configuration. See the [AWS CLI IAM Identity Center guide](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sso.html) if your profile is not yet provisioned.
+Follow the prompts in the terminal and browser. Use the IAM Identity Center start URL supplied by your administrator, the SSO region that hosts your organization’s Identity Center directory, the AWS account and permission set that may invoke Bedrock, and `YOUR_AWS_PROFILE` as the profile name. The SSO region is the directory’s region; it can be different from the Bedrock runtime region in the proxy configuration. See the [AWS CLI IAM Identity Center guide](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sso.html) if your profile is not yet provisioned.
 
 Start or refresh the browser-backed session before running the proxy:
 
 ```sh
-aws sso login --profile Halo-Win-Agent-Execution
-aws sts get-caller-identity --profile Halo-Win-Agent-Execution
+aws sso login --profile YOUR_AWS_PROFILE
+aws sts get-caller-identity --profile YOUR_AWS_PROFILE
 ```
 
 The second command should return the account and role you intend to use. The AWS CLI caches the temporary SSO session locally; do not copy access keys into the proxy configuration.
@@ -57,7 +57,7 @@ Edit `~/.config/bedrock-proxy/config.yaml`:
 version: 1
 
 aws:
-  profile: Halo-Win-Agent-Execution
+  profile: YOUR_AWS_PROFILE
   region: us-east-2
 
 listen: 127.0.0.1:8787
@@ -72,7 +72,7 @@ models:
     max_tokens: 8192
 ```
 
-The model name under `models` is the local alias clients send. `bedrock_model_id` is the actual Bedrock model or inference-profile ID sent upstream. Add one entry per target you want clients to select, for example `coding` and `fast`. The proxy lists these aliases from `GET /v1/models`.
+Replace `YOUR_AWS_PROFILE` with the named AWS CLI profile you create or already use, and replace `REPLACE_WITH_YOUR_BEDROCK_MODEL_ID` with an accessible Bedrock model or inference-profile ID. The model name under `models` is the local alias clients send. `bedrock_model_id` is the actual Bedrock model or inference-profile ID sent upstream. Add one entry per target you want clients to select, for example `coding` and `fast`. The proxy lists these aliases from `GET /v1/models`.
 
 Configuration fields:
 
@@ -113,7 +113,7 @@ There are no configuration environment variables. Use `--config` when a separate
 After editing the model target and logging in with SSO, start it with:
 
 ```sh
-aws sso login --profile Halo-Win-Agent-Execution
+aws sso login --profile YOUR_AWS_PROFILE
 bedrock-proxy
 ```
 

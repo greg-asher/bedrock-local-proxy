@@ -163,7 +163,7 @@ func TestMain(m *testing.M) {
 func writeTestConfig(t *testing.T, listen string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	contents := "version: 1\naws:\n  profile: Halo-Win-Agent-Execution\n  region: us-east-2\nlisten: " + listen + "\nmodels:\n  coding:\n    bedrock_model_id: model-a\n"
+	contents := "version: 1\naws:\n  profile: YOUR_AWS_PROFILE\n  region: us-east-2\nlisten: " + listen + "\nmodels:\n  coding:\n    bedrock_model_id: model-a\n"
 	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}
