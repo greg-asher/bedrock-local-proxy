@@ -72,7 +72,7 @@ models:
     max_tokens: 8192
 ```
 
-The model name under `models` is the local alias clients send. `bedrock_model_id` is the actual Bedrock model or inference-profile ID sent upstream. Add one entry per target you want clients to select, for example `coding` and `fast`. The proxy lists these aliases from `GET /v1/models`.
+Replace `YOUR_AWS_PROFILE` with the named AWS CLI profile you create or already use, and replace `REPLACE_WITH_YOUR_BEDROCK_MODEL_ID` with an accessible Bedrock model or inference-profile ID. The model name under `models` is the local alias clients send. `bedrock_model_id` is the actual Bedrock model or inference-profile ID sent upstream. Add one entry per target you want clients to select, for example `coding` and `fast`. The proxy lists these aliases from `GET /v1/models`.
 
 Configuration fields:
 
