@@ -45,6 +45,15 @@ type CompletionResult struct {
 	InputTokens                    *int64
 	OutputTokens                   *int64
 	ObservedUncoveredBillingFields bool
+	ClientFamily                   string
+	ClientVersion                  string
+	FunctionToolCalls              int
+	UnsupportedFeatureRejections   int
+	ContextWindow                  int64
+	MaxOutputTokens                int64
+	MetadataProfile                string
+	MetadataRevision               string
+	CatalogHash                    string
 }
 
 const maxUsageObservationBytes = 1 << 20
@@ -247,11 +256,17 @@ func transportErrorStatus(err error) int {
 }
 
 func (s *Server) writeOpenAIError(w http.ResponseWriter, status int, message, kind string) {
+	s.writeOpenAIErrorDetails(w, status, message, kind, nil, nil)
+}
+
+func (s *Server) writeOpenAIErrorDetails(w http.ResponseWriter, status int, message, kind string, param, code any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(openAIErrorEnvelope{Error: openAIError{
 		Message: message,
 		Type:    kind,
+		Param:   param,
+		Code:    code,
 	}})
 }
 

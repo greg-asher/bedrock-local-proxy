@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,6 +97,24 @@ func TestModelsListsConfiguredPublicNamesWithoutUpstream(t *testing.T) {
 	if got.Object != "list" || len(got.Data) != 2 || got.Data[0].ID != "coding" || got.Data[1].ID != "fast" {
 		t.Fatalf("unexpected model list: %+v", got)
 	}
+	if !strings.Contains(r.Body.String(), fmt.Sprintf(`"created":%d`, modelCreatedUnix)) || modelCreatedUnix <= 0 {
+		t.Fatalf("model list lacks stable nonzero creation time: %s", r.Body.String())
+	}
+}
+
+func TestModelRetrievalUsesStandardIdentityShape(t *testing.T) {
+	r := httptest.NewRecorder()
+	testServer().ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/v1/models/coding", nil))
+	if r.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+	}
+	var model modelRecord
+	if err := json.Unmarshal(r.Body.Bytes(), &model); err != nil {
+		t.Fatal(err)
+	}
+	if model.ID != "coding" || model.Object != "model" || model.Created != modelCreatedUnix || model.Owner != "bedrock-local-proxy" {
+		t.Fatalf("model=%+v", model)
+	}
 }
 
 func TestModelsRejectsUnknownRoutesAndMethods(t *testing.T) {
@@ -104,6 +124,8 @@ func TestModelsRejectsUnknownRoutesAndMethods(t *testing.T) {
 		status int
 	}{
 		{http.MethodPost, "/v1/models", http.StatusMethodNotAllowed},
+		{http.MethodPost, "/v1/models/coding", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/v1/models/missing", http.StatusNotFound},
 		{http.MethodGet, "/v1/unknown", http.StatusNotFound},
 	} {
 		r := httptest.NewRecorder()

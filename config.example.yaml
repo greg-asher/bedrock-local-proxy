@@ -18,3 +18,18 @@ models:
     output_per_million: 0
     temperature: 0.2
     max_tokens: 8192
+
+    # Required only for Codex catalog generation. Use an exact bundled profile
+    # when one matches bedrock_model_id, or supply every explicit value from
+    # authoritative documentation. The placeholders below are not defaults.
+    # capabilities:
+    #   metadata_profile: REPLACE_WITH_EXACT_SUPPORTED_PROFILE
+    #   context_window: REPLACE_WITH_DOCUMENTED_INTEGER
+    #   max_output_tokens: REPLACE_WITH_DOCUMENTED_INTEGER
+    #   input_modalities: [text]
+    #   reasoning:
+    #     supported: false
+    #     efforts: []
+    #   tools:
+    #     function_calling: true
+    #     parallel_calls: false

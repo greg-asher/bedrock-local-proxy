@@ -42,12 +42,13 @@ type ReportingConfig struct {
 // ModelConfig describes a public model name and its Bedrock target. Pointer
 // defaults preserve the distinction between an omitted value and zero.
 type ModelConfig struct {
-	DisplayName      string   `yaml:"display_name,omitempty"`
-	BedrockModelID   string   `yaml:"bedrock_model_id"`
-	InputPerMillion  *float64 `yaml:"input_per_million,omitempty"`
-	OutputPerMillion *float64 `yaml:"output_per_million,omitempty"`
-	Temperature      *float64 `yaml:"temperature,omitempty"`
-	MaxTokens        *int     `yaml:"max_tokens,omitempty"`
+	DisplayName      string            `yaml:"display_name,omitempty"`
+	BedrockModelID   string            `yaml:"bedrock_model_id"`
+	InputPerMillion  *float64          `yaml:"input_per_million,omitempty"`
+	OutputPerMillion *float64          `yaml:"output_per_million,omitempty"`
+	Temperature      *float64          `yaml:"temperature,omitempty"`
+	MaxTokens        *int              `yaml:"max_tokens,omitempty"`
+	Capabilities     *CapabilityConfig `yaml:"capabilities,omitempty"`
 }
 
 // DefaultPath returns the user-scoped configuration location. It does not
@@ -168,6 +169,21 @@ func (c *Config) Validate() error {
 		}
 		if model.MaxTokens != nil && *model.MaxTokens < 0 {
 			return fmt.Errorf("models.%s.max_tokens must not be negative", name)
+		}
+		if model.Capabilities != nil {
+			if model.MaxTokens != nil && *model.MaxTokens <= 0 {
+				return fmt.Errorf("models.%s.max_tokens must be a positive integer when capabilities are configured", name)
+			}
+			if model.MaxTokens != nil && model.Capabilities.MaxOutputTokens != nil && int64(*model.MaxTokens) > *model.Capabilities.MaxOutputTokens {
+				return fmt.Errorf("models.%s.max_tokens must not exceed capabilities.max_output_tokens (%d)", name, *model.Capabilities.MaxOutputTokens)
+			}
+			resolved, _, err := ResolveModelCapabilities(model)
+			if err != nil {
+				return fmt.Errorf("models.%s.capabilities: %w", name, err)
+			}
+			if model.MaxTokens != nil && int64(*model.MaxTokens) > resolved.MaxOutputTokens {
+				return fmt.Errorf("models.%s.max_tokens must not exceed capabilities.max_output_tokens (%d)", name, resolved.MaxOutputTokens)
+			}
 		}
 	}
 	return nil

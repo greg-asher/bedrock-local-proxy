@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,11 +21,12 @@ const (
 )
 
 type totals struct {
-	requests, successes, failures          int
-	knownInputTokens, knownOutputTokens    int64
-	knownEstimatedCost                     float64
-	missingUsageRequests, missingEstimates int
-	incompleteRequests                     int
+	requests, successes, failures            int
+	knownInputTokens, knownOutputTokens      int64
+	knownEstimatedCost                       float64
+	missingUsageRequests, missingEstimates   int
+	incompleteRequests                       int
+	functionToolCalls, unsupportedRejections int
 }
 
 type Recorder struct {
@@ -54,26 +56,37 @@ type requestRecord struct {
 	CostStatus                     string   `json:"cost_status"`
 	UsageStatus                    string   `json:"usage_status"`
 	ObservedUncoveredBillingFields bool     `json:"observed_uncovered_billing_fields,omitempty"`
+	ClientFamily                   string   `json:"client_family,omitempty"`
+	ClientVersion                  string   `json:"client_version,omitempty"`
+	MetadataProfile                string   `json:"metadata_profile,omitempty"`
+	MetadataRevision               string   `json:"metadata_revision,omitempty"`
+	CatalogHash                    string   `json:"catalog_hash,omitempty"`
+	ContextUtilization             *float64 `json:"context_utilization,omitempty"`
+	OutputUtilization              *float64 `json:"output_utilization,omitempty"`
+	FunctionToolCalls              int      `json:"function_tool_calls,omitempty"`
+	UnsupportedFeatureRejections   int      `json:"unsupported_feature_rejections,omitempty"`
 }
 
 type summaryRecord struct {
-	Event                   string  `json:"event"`
-	SessionID               string  `json:"session_id,omitempty"`
-	SessionTag              string  `json:"session_tag,omitempty"`
-	StartedAt               string  `json:"started_at,omitempty"`
-	FinishedAt              string  `json:"finished_at,omitempty"`
-	Status                  string  `json:"status,omitempty"`
-	RuntimeSeconds          float64 `json:"runtime_seconds"`
-	Requests                int     `json:"requests"`
-	Successes               int     `json:"successes"`
-	Failures                int     `json:"failures"`
-	KnownInputTokens        int64   `json:"known_input_tokens"`
-	KnownOutputTokens       int64   `json:"known_output_tokens"`
-	KnownEstimatedCost      float64 `json:"known_estimated_cost"`
-	MissingUsageRequests    int     `json:"missing_usage_requests"`
-	MissingEstimateRequests int     `json:"missing_estimate_requests"`
-	IncompleteRequests      int     `json:"incomplete_requests"`
-	CostStatus              string  `json:"cost_status"`
+	Event                        string  `json:"event"`
+	SessionID                    string  `json:"session_id,omitempty"`
+	SessionTag                   string  `json:"session_tag,omitempty"`
+	StartedAt                    string  `json:"started_at,omitempty"`
+	FinishedAt                   string  `json:"finished_at,omitempty"`
+	Status                       string  `json:"status,omitempty"`
+	RuntimeSeconds               float64 `json:"runtime_seconds"`
+	Requests                     int     `json:"requests"`
+	Successes                    int     `json:"successes"`
+	Failures                     int     `json:"failures"`
+	KnownInputTokens             int64   `json:"known_input_tokens"`
+	KnownOutputTokens            int64   `json:"known_output_tokens"`
+	KnownEstimatedCost           float64 `json:"known_estimated_cost"`
+	MissingUsageRequests         int     `json:"missing_usage_requests"`
+	MissingEstimateRequests      int     `json:"missing_estimate_requests"`
+	IncompleteRequests           int     `json:"incomplete_requests"`
+	CostStatus                   string  `json:"cost_status"`
+	FunctionToolCalls            int     `json:"function_tool_calls"`
+	UnsupportedFeatureRejections int     `json:"unsupported_feature_rejections"`
 }
 
 func New(w io.Writer, format Format, models map[string]config.ModelConfig) *Recorder {
@@ -102,14 +115,25 @@ func (r *Recorder) Record(result server.CompletionResult) {
 	entry := requestRecord{Event: "request", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Endpoint: result.Endpoint,
 		LocalModel: result.LocalModel, UpstreamModel: result.UpstreamModel, LatencyMS: float64(result.Elapsed) / float64(time.Millisecond),
 		HTTPStatus: result.HTTPStatus, Outcome: string(result.Outcome), InputTokens: input, OutputTokens: output,
-		CostStatus: "unavailable", UsageStatus: usageStatus, ObservedUncoveredBillingFields: result.ObservedUncoveredBillingFields}
+		CostStatus: "unavailable", UsageStatus: usageStatus, ObservedUncoveredBillingFields: result.ObservedUncoveredBillingFields,
+		ClientFamily: result.ClientFamily, ClientVersion: result.ClientVersion, MetadataProfile: result.MetadataProfile,
+		MetadataRevision: result.MetadataRevision, CatalogHash: result.CatalogHash, FunctionToolCalls: result.FunctionToolCalls,
+		UnsupportedFeatureRejections: result.UnsupportedFeatureRejections}
+	if input != nil && output != nil && result.ContextWindow > 0 {
+		value := float64(*input+*output) / float64(result.ContextWindow)
+		entry.ContextUtilization = &value
+	}
+	if output != nil && result.MaxOutputTokens > 0 {
+		value := float64(*output) / float64(result.MaxOutputTokens)
+		entry.OutputUtilization = &value
+	}
 	if costOK {
 		entry.EstimatedCost = &cost
 		entry.CostStatus = "estimated"
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if result.Endpoint != "/v1/models" {
+	if !strings.HasPrefix(result.Endpoint, "/v1/models") {
 		r.totals.requests++
 		if result.Outcome == server.CompletionSucceeded {
 			r.totals.successes++
@@ -130,6 +154,8 @@ func (r *Recorder) Record(result server.CompletionResult) {
 		} else {
 			r.totals.knownEstimatedCost += cost
 		}
+		r.totals.functionToolCalls += result.FunctionToolCalls
+		r.totals.unsupportedRejections += result.UnsupportedFeatureRejections
 	}
 	if r.session != nil {
 		r.session.RecordRequest(entry)
@@ -157,6 +183,8 @@ func (r *Recorder) WriteSummary() {
 	s := summaryRecord{Event: "summary", RuntimeSeconds: time.Since(r.started).Seconds(), Requests: r.totals.requests, Successes: r.totals.successes, Failures: r.totals.failures,
 		KnownInputTokens: r.totals.knownInputTokens, KnownOutputTokens: r.totals.knownOutputTokens, KnownEstimatedCost: r.totals.knownEstimatedCost,
 		MissingUsageRequests: r.totals.missingUsageRequests, MissingEstimateRequests: r.totals.missingEstimates, IncompleteRequests: r.totals.incompleteRequests, CostStatus: "unavailable"}
+	s.FunctionToolCalls = r.totals.functionToolCalls
+	s.UnsupportedFeatureRejections = r.totals.unsupportedRejections
 	if r.totals.missingEstimates == 0 && r.totals.requests > 0 {
 		s.CostStatus = "estimated"
 	}

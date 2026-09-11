@@ -28,9 +28,11 @@ func TestJSONRecordsAndSummaryUseRealCompletionMetadata(t *testing.T) {
 		Endpoint: "/v1/responses", LocalModel: "coding", UpstreamModel: "provider/model",
 		Elapsed: 12 * time.Millisecond, HTTPStatus: &status, Outcome: server.CompletionSucceeded,
 		InputTokens: &inTokens, OutputTokens: &outTokens,
+		ClientFamily: "codex", ClientVersion: "0.142.5", MetadataProfile: "profile", MetadataRevision: "r1", CatalogHash: "hash",
+		ContextWindow: 1000, MaxOutputTokens: 100, FunctionToolCalls: 2, UnsupportedFeatureRejections: 1,
 	})
 	recorder.Record(server.CompletionResult{
-		Endpoint: "/v1/models", HTTPStatus: &status, Outcome: server.CompletionSucceeded,
+		Endpoint: "/v1/models/coding", HTTPStatus: &status, Outcome: server.CompletionSucceeded,
 	})
 	recorder.Record(server.CompletionResult{
 		Endpoint: "/v1/messages", LocalModel: "coding", Outcome: server.CompletionCanceled,
@@ -48,21 +50,25 @@ func TestJSONRecordsAndSummaryUseRealCompletionMetadata(t *testing.T) {
 		}
 	}
 	var request struct {
-		EstimatedCost *float64 `json:"estimated_cost"`
-		InputTokens   *int64   `json:"input_tokens"`
-		Outcome       string   `json:"outcome"`
+		EstimatedCost      *float64 `json:"estimated_cost"`
+		InputTokens        *int64   `json:"input_tokens"`
+		Outcome            string   `json:"outcome"`
+		ClientFamily       string   `json:"client_family"`
+		ContextUtilization *float64 `json:"context_utilization"`
+		OutputUtilization  *float64 `json:"output_utilization"`
+		FunctionToolCalls  int      `json:"function_tool_calls"`
 	}
 	if err := json.Unmarshal([]byte(lines[0]), &request); err != nil {
 		t.Fatal(err)
 	}
-	if request.EstimatedCost == nil || *request.EstimatedCost != 0.00035 || request.InputTokens == nil || *request.InputTokens != 100 {
+	if request.EstimatedCost == nil || *request.EstimatedCost != 0.00035 || request.InputTokens == nil || *request.InputTokens != 100 || request.ClientFamily != "codex" || request.ContextUtilization == nil || *request.ContextUtilization != 0.15 || request.OutputUtilization == nil || *request.OutputUtilization != 0.5 || request.FunctionToolCalls != 2 {
 		t.Fatalf("successful request metadata = %+v", request)
 	}
 	var summary summaryRecord
 	if err := json.Unmarshal([]byte(lines[3]), &summary); err != nil {
 		t.Fatal(err)
 	}
-	if summary.Requests != 2 || summary.Successes != 1 || summary.Failures != 1 || summary.KnownInputTokens != 100 || summary.KnownOutputTokens != 50 || summary.KnownEstimatedCost != 0.00035 || summary.MissingUsageRequests != 1 || summary.MissingEstimateRequests != 1 {
+	if summary.Requests != 2 || summary.Successes != 1 || summary.Failures != 1 || summary.KnownInputTokens != 100 || summary.KnownOutputTokens != 50 || summary.KnownEstimatedCost != 0.00035 || summary.MissingUsageRequests != 1 || summary.MissingEstimateRequests != 1 || summary.FunctionToolCalls != 2 || summary.UnsupportedFeatureRejections != 1 {
 		t.Fatalf("summary = %+v", summary)
 	}
 }

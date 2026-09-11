@@ -291,7 +291,7 @@ func prepareRequest(ctx context.Context, incoming *http.Request, endpoint *url.U
 func stripSensitiveHeaders(header http.Header) {
 	for key := range header {
 		lower := strings.ToLower(key)
-		if lower == "authorization" || lower == "x-api-key" || strings.HasPrefix(lower, "x-amz-") {
+		if lower == "authorization" || lower == "x-api-key" || lower == "x-bedrock-proxy-catalog" || strings.HasPrefix(lower, "x-amz-") {
 			delete(header, key)
 		}
 	}

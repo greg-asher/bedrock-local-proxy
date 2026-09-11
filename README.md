@@ -7,6 +7,7 @@ Bedrock Local Proxy is a localhost-only Go executable that exposes Amazon Bedroc
 - Go (the current supported Go version used by the repository)
 - AWS CLI v2 with access to your organization’s IAM Identity Center (AWS SSO) account and role
 - A Bedrock model or inference profile that the selected AWS role can invoke
+- Codex CLI when generating or validating a Codex model catalog
 
 ## 1. Configure AWS SSO
 
@@ -74,6 +75,19 @@ models:
     output_per_million: 0
     temperature: 0.2
     max_tokens: 8192
+
+    # Required for Codex. These are examples; use documented values for the
+    # exact configured target or an exact bundled metadata_profile.
+    capabilities:
+      context_window: 200000
+      max_output_tokens: 64000
+      input_modalities: [text, image]
+      reasoning:
+        supported: true
+        efforts: [low, medium, high]
+      tools:
+        function_calling: true
+        parallel_calls: true
 ```
 
 Replace `YOUR_AWS_PROFILE` with the named AWS CLI profile you create or already use, and replace `REPLACE_WITH_YOUR_BEDROCK_MODEL_ID` with an accessible Bedrock model or inference-profile ID. The model name under `models` is the local alias clients send. `bedrock_model_id` is the actual Bedrock model or inference-profile ID sent upstream. Add one entry per target you want clients to select, for example `coding` and `fast`. The proxy lists these aliases from `GET /v1/models`.
@@ -93,8 +107,18 @@ Configuration fields:
 | `models.<alias>.output_per_million` | no | Output price in dollars per million tokens, used only for estimated logs. `0` is valid. |
 | `models.<alias>.temperature` | no | Default temperature inserted only when the request omits it. |
 | `models.<alias>.max_tokens` | no | Default output-token limit inserted only when the request omits it. |
+| `models.<alias>.capabilities.metadata_profile` | Codex only | Exact bundled metadata profile. Profiles are matched only by name or exact Bedrock target ID. |
+| `models.<alias>.capabilities.context_window` | Codex only | Documented hard total-context limit. Explicit values override a selected profile. |
+| `models.<alias>.capabilities.max_output_tokens` | Codex only | Documented hard output limit. `max_tokens` must not exceed it. |
+| `models.<alias>.capabilities.input_modalities` | Codex only | Supported input types: `text` and optionally `image`. |
+| `models.<alias>.capabilities.reasoning` | Codex only | Whether adjustable reasoning is supported and the exact supported efforts. |
+| `models.<alias>.capabilities.tools` | Codex only | Client-side function-calling and parallel-call support. |
 
 Prices are never fetched automatically. If the upstream response does not contain both token counts, or either price is omitted, the log reports the estimate as unavailable rather than treating it as zero. Keep model aliases free of surrounding whitespace and use finite, nonnegative prices.
+
+Capability numbers in the example are placeholders, not proxy defaults. `configure codex` requires complete resolved metadata and fails with the missing fields rather than guessing. Explicit values take precedence over an exact selected profile; values above a bundled documented limit are reported for review. Existing version `1` configurations without `capabilities` continue to serve other clients.
+
+Codex CLI `0.142.5` exposes context, modality, reasoning, parallel-tool, and search capabilities through its model catalog, but it does not expose a model output-ceiling field. The generated catalog retains `max_output_tokens` in proxy-owned metadata, and the proxy enforces that hard ceiling on every Responses request. When Codex omits a request limit, `models.<alias>.max_tokens` supplies the request default. `configure codex` and `doctor` report this client limitation explicitly so an output ceiling is never mistaken for metadata Codex consumed.
 
 The process accepts these command-line options:
 
@@ -132,7 +156,7 @@ Each report contains `session.json`, `events.jsonl`, and `summary.json`. The rep
 
 ## Create a period report
 
-Generate a standalone HTML report from locally stored session events. It includes request and cost charts, token and estimated-cost totals, success and failure coverage, plus model, endpoint, and session-tag breakdowns. It does not contact AWS or need credentials.
+Generate a standalone HTML report from locally stored session events. It includes request and cost charts, token and estimated-cost totals, success and failure coverage, function-call and unsupported-feature counts, utilization metrics, and model, endpoint, tag, client, metadata-profile, and catalog breakdowns. It does not contact AWS or need credentials.
 
 ```sh
 bedrock-proxy report \
@@ -152,6 +176,50 @@ Use `local` as a nonempty dummy API key in clients. It is only for satisfying cl
 
 ## 5. Point a client at the local API
 
+### Codex CLI
+
+Generate a catalog after setting accurate capabilities for the selected alias:
+
+```sh
+bedrock-proxy configure codex --model coding
+```
+
+With one configured alias, `--model` is optional. With several aliases it is required. The command reads the installed Codex bundled catalog, preserves its entries, adds the selected local alias, verifies that Codex can parse the result, and writes it with owner-only permissions. The default path is `~/.config/bedrock-proxy/clients/codex/models.json`; a custom proxy configuration places it beside that configuration under `clients/codex`, and `--catalog` overrides it.
+
+Choose a local alias that does not match a Codex bundled model slug. Catalog generation rejects collisions so it cannot replace built-in Codex metadata.
+
+The command prints the complete `bedrock-local` provider/profile TOML and the profile file path. Add that TOML at the printed path. It uses `http://127.0.0.1:8787/v1`, the Responses wire API, a non-secret local bearer value, the generated catalog, and the selected alias. It also sets `web_search = "disabled"` and `tools.web_search = false` so Codex does not offer OpenAI-hosted search while MCP tools remain available. It does not modify Codex configuration. Regenerate after changing the selected target, display name, or any capability; `doctor` compares the active configuration fingerprint with the catalog and rejects stale metadata.
+
+Run the offline compatibility checks before AWS login:
+
+```sh
+bedrock-proxy doctor --client codex --model coding
+```
+
+After the proxy is running and SSO is active, exercise model discovery, nonstreaming and streaming Responses, cancellation, usage, and a function-call/result continuation:
+
+```sh
+bedrock-proxy doctor --client codex --model coding --live
+codex --profile bedrock-local
+```
+
+OpenAI `web_search` is a server-hosted Responses tool. The [Bedrock Runtime Responses endpoint](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html) supports client-side tools but does not execute that hosted tool, so the generated catalog advertises hosted search as unavailable. Configure the desired search provider as an MCP in Codex instead. Codex discovers and executes the MCP, while the proxy transports resulting function calls and outputs without inspecting their content. Disabling hosted search does not disable MCP tools. Claude 4 models can return several independent tool calls in one turn, so the bundled Sonnet 4.5 profile advertises parallel calls as supported; the [Claude parallel tool-use guide](https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use) describes that behavior. If a client still sends a hosted tool, the proxy returns `400 unsupported_hosted_tool` before making an AWS request. The generated keys follow the [Codex configuration reference](https://developers.openai.com/codex/config-reference).
+
+The complete clean-install sequence is:
+
+```sh
+./install.sh
+# edit ~/.config/bedrock-proxy/config.yaml
+bedrock-proxy configure codex --model coding
+# add the printed provider/profile TOML at the printed Codex profile path
+# configure the desired search MCP in Codex
+bedrock-proxy doctor --client codex --model coding
+aws sso login --profile YOUR_AWS_PROFILE
+bedrock-proxy --session-tag NAME
+bedrock-proxy doctor --client codex --model coding --live
+codex --profile bedrock-local
+```
+
 ### OpenAI-compatible clients
 
 Set the client’s base URL to `http://127.0.0.1:8787/v1`, use `local` as the API key, and select a configured alias such as `coding`.
@@ -162,6 +230,8 @@ Check the aliases:
 curl http://127.0.0.1:8787/v1/models \
   -H 'Authorization: Bearer local'
 ```
+
+Retrieve one alias with `GET /v1/models/coding`. Both discovery routes return standard model identity fields; Codex-specific capability metadata lives in the generated catalog.
 
 Send a Chat Completions request:
 
@@ -216,6 +286,8 @@ The proxy forwards Anthropic headers and the Messages request shape to Bedrock�
 - **Unknown model:** use an alias defined under `models`, then verify it with `curl http://127.0.0.1:8787/v1/models`.
 - **Port already in use:** change `listen` to another loopback port and update the client base URL.
 - **Model access denied or unsupported:** confirm that the selected role, region, and Bedrock model/inference profile are compatible.
+- **Codex reports fallback or missing model metadata:** rerun `bedrock-proxy configure codex --model <alias>`, replace the profile TOML, then run the offline doctor. Regenerate after a Codex upgrade when doctor reports catalog drift.
+- **Codex asks for hosted web search:** configure search as an MCP in Codex. The proxy deliberately rejects hosted Responses tools because Bedrock Runtime does not execute them.
 
 ## Cross-build checks
 

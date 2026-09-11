@@ -26,7 +26,7 @@ func TestSessionReporterWritesPrivateSafeReport(t *testing.T) {
 		Version:         "test",
 		RequestedListen: "127.0.0.1:0",
 		Models: map[string]config.ModelConfig{
-			"coding": {BedrockModelID: "anthropic.claude-test"},
+			"coding": sessionCapabilityModel(),
 		},
 	})
 	if err != nil {
@@ -41,7 +41,7 @@ func TestSessionReporterWritesPrivateSafeReport(t *testing.T) {
 	recorder.SetSessionReporter(reporter)
 	status := 200
 	input, output := int64(3), int64(4)
-	recorder.Record(server.CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: "coding", UpstreamModel: "anthropic.claude-test", HTTPStatus: &status, Outcome: server.CompletionSucceeded, InputTokens: &input, OutputTokens: &output})
+	recorder.Record(server.CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: "coding", UpstreamModel: "anthropic.claude-test", HTTPStatus: &status, Outcome: server.CompletionSucceeded, InputTokens: &input, OutputTokens: &output, ClientFamily: "codex", ClientVersion: "0.142.5", MetadataProfile: "test-profile", MetadataRevision: "r1", CatalogHash: strings.Repeat("a", 64), ContextWindow: 100, MaxOutputTokens: 20, FunctionToolCalls: 1})
 	recorder.Record(server.CompletionResult{Endpoint: "/v1/messages", LocalModel: "coding", Outcome: server.CompletionCanceled})
 	recorder.Record(server.CompletionResult{Endpoint: "/v1/models", HTTPStatus: &status, Outcome: server.CompletionSucceeded})
 	recorder.WriteSummary()
@@ -73,7 +73,7 @@ func TestSessionReporterWritesPrivateSafeReport(t *testing.T) {
 
 	var manifest sessionManifest
 	readJSON(t, filepath.Join(info.Directory, "session.json"), &manifest)
-	if manifest.Status != SessionCompleted || manifest.SessionTag != info.SessionTag || manifest.Models[0].BedrockModelID != "anthropic.claude-test" {
+	if manifest.Status != SessionCompleted || manifest.SessionTag != info.SessionTag || manifest.Models[0].BedrockModelID != "anthropic.claude-test" || manifest.Models[0].ContextWindow != 100 || manifest.Models[0].MaxOutputTokens != 20 {
 		t.Fatalf("manifest = %+v", manifest)
 	}
 	var summary summaryRecord
@@ -99,11 +99,24 @@ func TestSessionReporterWritesPrivateSafeReport(t *testing.T) {
 		}
 	}
 	all := string(data)
+	if !strings.Contains(all, `"client_family":"codex"`) || !strings.Contains(all, `"catalog_hash":"`+strings.Repeat("a", 64)+`"`) || !strings.Contains(all, `"function_tool_calls":1`) {
+		t.Fatalf("report omitted safe compatibility metadata: %s", all)
+	}
 	for _, sentinel := range []string{"prompt-secret", "completion-secret", "tool-secret", "credential-secret", "header-secret", "raw-upstream-error"} {
 		if strings.Contains(all, sentinel) {
 			t.Fatalf("report leaked %q", sentinel)
 		}
 	}
+}
+
+func sessionCapabilityModel() config.ModelConfig {
+	contextWindow, maxOutput := int64(100), int64(20)
+	reasoning, functions, parallel := false, true, false
+	return config.ModelConfig{BedrockModelID: "anthropic.claude-test", Capabilities: &config.CapabilityConfig{
+		ContextWindow: &contextWindow, MaxOutputTokens: &maxOutput, InputModalities: []string{"text"},
+		Reasoning: config.ReasoningCapability{Supported: &reasoning},
+		Tools:     config.ToolCapability{FunctionCalling: &functions, ParallelCalls: &parallel},
+	}}
 }
 
 func TestSessionTagValidation(t *testing.T) {
