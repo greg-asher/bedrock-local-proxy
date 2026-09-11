@@ -62,6 +62,10 @@ aws:
 
 listen: 127.0.0.1:8787
 
+# Optional. Relative paths resolve from this configuration file.
+# reporting:
+#   directory: reports
+
 models:
   coding:
     display_name: Claude Sonnet for coding
@@ -82,6 +86,7 @@ Configuration fields:
 | `aws.profile` | yes | Named AWS CLI profile used for SSO credentials. |
 | `aws.region` | yes | Bedrock runtime region, such as `us-east-2`. |
 | `listen` | no | Loopback TCP address. The default is `127.0.0.1:8787`; non-loopback addresses are rejected. |
+| `reporting.directory` | no | Parent directory for private per-session reports. A relative path resolves from the configuration file. |
 | `models.<alias>.display_name` | no | Human-readable label for the configured target; the alias remains the client-facing model name. |
 | `models.<alias>.bedrock_model_id` | yes | Bedrock model ID or inference-profile ID. |
 | `models.<alias>.input_per_million` | no | Input price in dollars per million tokens, used only for estimated logs. `0` is valid. |
@@ -97,16 +102,18 @@ The process accepts these command-line options:
 --config PATH       load a different YAML file
 --log-format text   human-readable startup, request, and summary logs (default)
 --log-format json   one JSON object per log line
+--report-dir PATH   parent directory for one run's session report
+--session-tag NAME  optional ingestion tag for one run
 --version           print the installed version and exit
 ```
 
 For example:
 
 ```sh
-bedrock-proxy --config ./config.yaml --log-format json
+bedrock-proxy --config ./config.yaml --log-format json --session-tag nightly-ingest
 ```
 
-There are no configuration environment variables. Use `--config` when a separate file is needed.
+There are no configuration environment variables. `XDG_STATE_HOME` only selects the default report parent; use `--config` when a separate configuration file is needed.
 
 ## 4. Start the proxy
 
@@ -117,7 +124,23 @@ aws sso login --profile YOUR_AWS_PROFILE
 bedrock-proxy
 ```
 
-Successful startup prints the local URL, AWS profile, Bedrock region, and configured aliases. Startup does not contact AWS; the first generation request loads credentials, signs the request, and proves model access. Stop the proxy with `Ctrl-C`. It stops admitting new requests and drains active requests for up to five seconds.
+Successful startup prints the local URL, AWS profile, Bedrock region, configured aliases, and the absolute session-report path. `--session-tag` also prints the supplied tag. Startup does not contact AWS; the first generation request loads credentials, signs the request, and proves model access. Stop the proxy with `Ctrl-C`. It stops admitting new requests and drains active requests for up to five seconds.
+
+Every run writes a private report by default. The parent directory is `$XDG_STATE_HOME/bedrock-proxy/sessions` when `XDG_STATE_HOME` is an absolute path, otherwise `~/.local/state/bedrock-proxy/sessions`. Use `reporting.directory` for a persistent override or `--report-dir` for one run; relative CLI paths resolve from the current directory.
+
+Each report contains `session.json`, `events.jsonl`, and `summary.json`. The report retains request outcome, endpoint, alias, configured Bedrock target ID, latency, status, observed token counts, and estimated cost. It does not retain the AWS profile, prompts, completions, tool content, request bodies, headers, credentials, or raw upstream errors. Report directories use owner-only permissions and recognized reports older than 30 days are removed when the proxy starts. Cleanup warnings do not stop the proxy.
+
+## Create a period report
+
+Generate a standalone HTML report from locally stored session events. It includes request and cost charts, token and estimated-cost totals, success and failure coverage, plus model, endpoint, and session-tag breakdowns. It does not contact AWS or need credentials.
+
+```sh
+bedrock-proxy report \
+  --start 2026-09-01T00:00:00Z \
+  --stop 2026-09-08T00:00:00Z
+```
+
+`--start` is inclusive and `--stop` is exclusive, so adjacent reports do not double-count requests. Both accept RFC3339 timestamps or `YYYY-MM-DD`. The default report is an owner-only HTML file under `<report-parent>/summaries`; the command prints its absolute path. Use `--report-dir` to read a different report parent, `--config` to use a configuration file’s `reporting.directory`, `--output PATH` to choose the output file, or `--format json` for the structured aggregate without charts.
 
 The local API is available at:
 

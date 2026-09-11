@@ -6,6 +6,10 @@ aws:
 
 listen: 127.0.0.1:8787
 
+# Optional. Relative paths resolve from this configuration file.
+# reporting:
+#   directory: reports
+
 models:
   coding:
     display_name: Replace me
