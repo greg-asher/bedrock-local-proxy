@@ -97,7 +97,7 @@ func TestGenerateRepricesRecordedUsageFromCurrentModels(t *testing.T) {
 	start := time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC)
 	stale := 9.0
 	writeSession(t, parent, "session-pricing", []event{
-		{Event: "request", Timestamp: start.Add(time.Hour).Format(time.RFC3339Nano), Endpoint: "/v1/responses", LocalModel: "coding", Outcome: "success", InputTokens: int64ptr(1000), OutputTokens: int64ptr(100), CacheReadInputTokens: int64ptr(400), CacheWriteInputTokens: int64ptr(100), EstimatedCost: &stale, UsageStatus: "known"},
+		{Event: "request", Timestamp: start.Add(time.Hour).Format(time.RFC3339Nano), Endpoint: "/v1/responses", LocalModel: "coding", UpstreamModel: "us.openai.gpt-5.6-luna", Outcome: "success", InputTokens: int64ptr(1000), OutputTokens: int64ptr(100), CacheReadInputTokens: int64ptr(400), CacheWriteInputTokens: int64ptr(100), EstimatedCost: &stale, UsageStatus: "known"},
 		{Event: "request", Timestamp: start.Add(2 * time.Hour).Format(time.RFC3339Nano), Endpoint: "/v1/messages", LocalModel: "claude", Outcome: "success", InputTokens: int64ptr(1000), OutputTokens: int64ptr(100), CacheReadInputTokens: int64ptr(400), CacheWriteInputTokens: int64ptr(100), UsageStatus: "known"},
 		{Event: "request", Timestamp: start.Add(3 * time.Hour).Format(time.RFC3339Nano), Endpoint: "/v1/responses", LocalModel: "legacy", Outcome: "success", InputTokens: int64ptr(10), OutputTokens: int64ptr(2), EstimatedCost: float64ptr(0.5), UsageStatus: "known"},
 		{Event: "request", Timestamp: start.Add(4 * time.Hour).Format(time.RFC3339Nano), Endpoint: "/v1/responses", LocalModel: "unpriced", Outcome: "success", InputTokens: int64ptr(10), OutputTokens: int64ptr(2), EstimatedCost: &stale, UsageStatus: "known"},
@@ -106,7 +106,7 @@ func TestGenerateRepricesRecordedUsageFromCurrentModels(t *testing.T) {
 	inputPrice, outputPrice := 2.0, 10.0
 	cacheReadPrice, cacheWritePrice := 0.2, 2.5
 	models := map[string]config.ModelConfig{
-		"coding":     {InputPerMillion: &inputPrice, OutputPerMillion: &outputPrice, CacheReadInputPerMillion: &cacheReadPrice, CacheWriteInputPerMillion: &cacheWritePrice},
+		"coding":     {BedrockModelID: "us.openai.gpt-5.6-luna", InputPerMillion: &inputPrice, OutputPerMillion: &outputPrice},
 		"claude":     {InputPerMillion: &inputPrice, OutputPerMillion: &outputPrice, CacheReadInputPerMillion: &cacheReadPrice, CacheWriteInputPerMillion: &cacheWritePrice},
 		"unpriced":   {InputPerMillion: &inputPrice},
 		"retargeted": {BedrockModelID: "new-target", InputPerMillion: &inputPrice, OutputPerMillion: &outputPrice},

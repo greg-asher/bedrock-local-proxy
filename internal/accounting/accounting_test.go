@@ -209,16 +209,13 @@ func (responsesCostDoer) Do(_ context.Context, _ *http.Request) (*http.Response,
 	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
 }
 
-func TestResponsesHandlerProducesCacheAwareEstimatedCost(t *testing.T) {
+func TestResponsesHandlerDerivesDocumentedCacheRatesFromExactTarget(t *testing.T) {
 	inputPrice, outputPrice := 2.0, 10.0
-	cacheReadPrice, cacheWritePrice := 0.2, 2.5
 	cfg := config.Config{Models: map[string]config.ModelConfig{
 		"coding": {
-			BedrockModelID:            "target",
-			InputPerMillion:           &inputPrice,
-			OutputPerMillion:          &outputPrice,
-			CacheReadInputPerMillion:  &cacheReadPrice,
-			CacheWriteInputPerMillion: &cacheWritePrice,
+			BedrockModelID:   "us.openai.gpt-5.6-luna",
+			InputPerMillion:  &inputPrice,
+			OutputPerMillion: &outputPrice,
 		},
 	}}
 	var outputLog bytes.Buffer
