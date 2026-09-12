@@ -195,7 +195,7 @@ Each report contains `session.json`, `events.jsonl`, and `summary.json`. The rep
 
 ## Create a period report
 
-Generate a standalone HTML report from locally stored session events. It includes request and cost charts, token and estimated-cost totals, success and failure coverage, function-call and unsupported-feature counts, utilization metrics, and model, endpoint, tag, client, metadata-profile, Codex-catalog, and Claude-settings breakdowns. It does not contact AWS or need credentials.
+Generate a standalone HTML dashboard from locally stored session events. It highlights incomplete usage or pricing, charts request outcomes and known spend over time, separates cache reads and writes, and ranks cost and usage by model and session tag. Endpoint and client summaries help trace failures, while metadata-profile, Codex-catalog, and Claude-settings identifiers remain available in a collapsed diagnostics section. It does not contact AWS or need credentials.
 
 ```sh
 bedrock-proxy report \

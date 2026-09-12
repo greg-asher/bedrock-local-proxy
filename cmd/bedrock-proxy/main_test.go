@@ -253,7 +253,7 @@ func TestReportCommandWritesPeriodHTMLWithoutConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "Requests over time") || !strings.Contains(string(data), "nightly") {
+	if !strings.Contains(string(data), "Request activity") || !strings.Contains(string(data), "Cost and usage by session tag") || !strings.Contains(string(data), "nightly") {
 		t.Fatalf("report HTML missing metrics: %s", data)
 	}
 	info, err := os.Stat(output)
