@@ -58,13 +58,15 @@ type ClaudeConfig struct {
 // ModelConfig describes a public model name and its Bedrock target. Pointer
 // defaults preserve the distinction between an omitted value and zero.
 type ModelConfig struct {
-	DisplayName      string            `yaml:"display_name,omitempty"`
-	BedrockModelID   string            `yaml:"bedrock_model_id"`
-	InputPerMillion  *float64          `yaml:"input_per_million,omitempty"`
-	OutputPerMillion *float64          `yaml:"output_per_million,omitempty"`
-	Temperature      *float64          `yaml:"temperature,omitempty"`
-	MaxTokens        *int              `yaml:"max_tokens,omitempty"`
-	Capabilities     *CapabilityConfig `yaml:"capabilities,omitempty"`
+	DisplayName               string            `yaml:"display_name,omitempty"`
+	BedrockModelID            string            `yaml:"bedrock_model_id"`
+	InputPerMillion           *float64          `yaml:"input_per_million,omitempty"`
+	OutputPerMillion          *float64          `yaml:"output_per_million,omitempty"`
+	CacheReadInputPerMillion  *float64          `yaml:"cache_read_input_per_million,omitempty"`
+	CacheWriteInputPerMillion *float64          `yaml:"cache_write_input_per_million,omitempty"`
+	Temperature               *float64          `yaml:"temperature,omitempty"`
+	MaxTokens                 *int              `yaml:"max_tokens,omitempty"`
+	Capabilities              *CapabilityConfig `yaml:"capabilities,omitempty"`
 }
 
 // DefaultPath returns the user-scoped configuration location. It does not
@@ -204,11 +206,18 @@ func (c *Config) Validate() error {
 		if strings.TrimSpace(model.BedrockModelID) == "" {
 			return fmt.Errorf("models.%s.bedrock_model_id is required", name)
 		}
-		if model.InputPerMillion != nil && (!finite(*model.InputPerMillion) || *model.InputPerMillion < 0) {
-			return fmt.Errorf("models.%s.input_per_million must be a finite nonnegative number", name)
-		}
-		if model.OutputPerMillion != nil && (!finite(*model.OutputPerMillion) || *model.OutputPerMillion < 0) {
-			return fmt.Errorf("models.%s.output_per_million must be a finite nonnegative number", name)
+		for _, price := range []struct {
+			field string
+			value *float64
+		}{
+			{field: "input_per_million", value: model.InputPerMillion},
+			{field: "output_per_million", value: model.OutputPerMillion},
+			{field: "cache_read_input_per_million", value: model.CacheReadInputPerMillion},
+			{field: "cache_write_input_per_million", value: model.CacheWriteInputPerMillion},
+		} {
+			if price.value != nil && (!finite(*price.value) || *price.value < 0) {
+				return fmt.Errorf("models.%s.%s must be a finite nonnegative number", name, price.field)
+			}
 		}
 		if model.Temperature != nil && !finite(*model.Temperature) {
 			return fmt.Errorf("models.%s.temperature must be finite", name)

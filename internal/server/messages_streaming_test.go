@@ -13,7 +13,7 @@ import (
 
 func TestMessagesStreamingForwardsRealTextAndToolEventsIncrementally(t *testing.T) {
 	const first = ": keep-alive\n\nevent: message_start\ndata: {" +
-		`"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","content":[],"model":"target","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"cache_read_input_tokens":3,"output_tokens":1}}}` + "\n\n"
+		`"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","content":[],"model":"target","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"cache_read_input_tokens":3,"cache_creation_input_tokens":2,"output_tokens":1}}}` + "\n\n"
 	const splitRecord = "event: content_block_start\ndata: {" + `"type":"content_block_`
 	const firstWithSplitRecord = first + splitRecord
 	const rest = `start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
@@ -73,8 +73,8 @@ func TestMessagesStreamingForwardsRealTextAndToolEventsIncrementally(t *testing.
 	if recorder.Header().Get("Content-Type") != "text/event-stream" || recorder.Header().Get("X-Request-Id") != "msg-stream-1" {
 		t.Fatalf("stream headers not preserved: %v", recorder.Header())
 	}
-	if resultCount != 1 || result.Endpoint != "/v1/messages" || result.Outcome != CompletionSucceeded || result.InputTokens == nil || *result.InputTokens != 25 || result.OutputTokens == nil || *result.OutputTokens != 6 || !result.ObservedUncoveredBillingFields || result.FunctionToolCalls != 1 {
-		t.Fatalf("completion result = %+v (count=%d), want one successful result with latest cumulative usage", result, resultCount)
+	if resultCount != 1 || result.Endpoint != "/v1/messages" || result.Outcome != CompletionSucceeded || result.InputTokens == nil || *result.InputTokens != 25 || result.OutputTokens == nil || *result.OutputTokens != 6 || result.CacheReadInputTokens == nil || *result.CacheReadInputTokens != 3 || result.CacheWriteInputTokens == nil || *result.CacheWriteInputTokens != 2 || result.ObservedUncoveredBillingFields || result.FunctionToolCalls != 1 {
+		t.Fatalf("completion result = %+v (count=%d), want one successful cache-aware result with latest cumulative usage", result, resultCount)
 	}
 	select {
 	case <-body.closeCalled:

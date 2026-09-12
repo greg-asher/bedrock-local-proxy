@@ -16,7 +16,7 @@ import (
 )
 
 func TestResponsesTransformsNativeRequestAndRecordsUsage(t *testing.T) {
-	const responseBody = `{"id":"resp_123","object":"response","created_at":1730000000,"status":"completed","completed_at":1730000001,"error":null,"incomplete_details":null,"model":"us.openai.gpt-test-v1:0","output":[{"id":"msg_123","type":"message","role":"assistant","content":[{"type":"output_text","text":"hello","annotations":[]}]}],"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":3},"output_tokens":7,"output_tokens_details":{"reasoning_tokens":2},"total_tokens":19},"metadata":{}}`
+	const responseBody = `{"id":"resp_123","object":"response","created_at":1730000000,"status":"completed","completed_at":1730000001,"error":null,"incomplete_details":null,"model":"us.openai.gpt-test-v1:0","output":[{"id":"msg_123","type":"message","role":"assistant","content":[{"type":"output_text","text":"hello","annotations":[]}]}],"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":2,"future_billed_tokens":0},"output_tokens":7,"output_tokens_details":{"reasoning_tokens":2},"total_tokens":19},"metadata":{}}`
 	fake := &fakeRequestDoer{response: &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}, "X-Request-Id": []string{"resp-1"}},
@@ -60,8 +60,8 @@ func TestResponsesTransformsNativeRequestAndRecordsUsage(t *testing.T) {
 	if string(got["unknown_number"]) != "9007199254740993123456789" || !strings.Contains(string(got["input"]), "function_call_output") {
 		t.Fatalf("input items or numeric precision changed: %s", body)
 	}
-	if result.Endpoint != "/v1/responses" || result.Outcome != CompletionSucceeded || result.InputTokens == nil || *result.InputTokens != 12 || result.OutputTokens == nil || *result.OutputTokens != 7 || !result.ObservedUncoveredBillingFields {
-		t.Fatalf("completion result = %+v, want successful usage with detail dimensions", result)
+	if result.Endpoint != "/v1/responses" || result.Outcome != CompletionSucceeded || result.InputTokens == nil || *result.InputTokens != 12 || result.OutputTokens == nil || *result.OutputTokens != 7 || result.CacheReadInputTokens == nil || *result.CacheReadInputTokens != 3 || result.CacheWriteInputTokens == nil || *result.CacheWriteInputTokens != 2 || result.ObservedUncoveredBillingFields || !result.InputTokensIncludeCache {
+		t.Fatalf("completion result = %+v, want successful cache-aware usage", result)
 	}
 }
 
@@ -357,7 +357,7 @@ func TestResponsesStreamingPreservesRealSSEAndUsesTerminalUsage(t *testing.T) {
 	const streamBody = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"target\"}}\n\n" +
 		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_123\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hel\",\"sequence_number\":1}\n\n" +
 		"event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"item_id\":\"msg_123\",\"output_index\":0,\"content_index\":0,\"text\":\"Hello\",\"sequence_number\":2}\n\n" +
-		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"object\":\"response\",\"status\":\"completed\",\"output\":[{\"id\":\"msg_123\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":12,\"output_tokens\":7,\"total_tokens\":19,\"input_tokens_details\":{\"cached_tokens\":3}}}}\n\n"
+		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"object\":\"response\",\"status\":\"completed\",\"output\":[{\"id\":\"msg_123\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":12,\"output_tokens\":7,\"total_tokens\":19,\"input_tokens_details\":{\"cached_tokens\":3,\"cache_write_tokens\":2}}}}\n\n"
 	fake := &fakeRequestDoer{response: &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}, "X-Request-Id": []string{"stream-1"}}, Body: io.NopCloser(strings.NewReader(streamBody))}}
 	s := NewWithTransport(chatTestConfig(), fake)
 	var result CompletionResult
@@ -371,8 +371,8 @@ func TestResponsesStreamingPreservesRealSSEAndUsesTerminalUsage(t *testing.T) {
 	if recorder.Header().Get("X-Request-Id") != "stream-1" || recorder.Header().Get("Content-Type") != "text/event-stream" {
 		t.Fatalf("stream headers not preserved: %v", recorder.Header())
 	}
-	if count != 1 || result.Outcome != CompletionSucceeded || result.InputTokens == nil || *result.InputTokens != 12 || result.OutputTokens == nil || *result.OutputTokens != 7 || !result.ObservedUncoveredBillingFields {
-		t.Fatalf("completion result = %+v (count=%d), want one successful terminal result", result, count)
+	if count != 1 || result.Outcome != CompletionSucceeded || result.InputTokens == nil || *result.InputTokens != 12 || result.OutputTokens == nil || *result.OutputTokens != 7 || result.CacheReadInputTokens == nil || *result.CacheReadInputTokens != 3 || result.CacheWriteInputTokens == nil || *result.CacheWriteInputTokens != 2 || result.ObservedUncoveredBillingFields || !result.InputTokensIncludeCache {
+		t.Fatalf("completion result = %+v (count=%d), want one successful cache-aware terminal result", result, count)
 	}
 	if fake.request == nil {
 		t.Fatal("fake transport did not receive request")

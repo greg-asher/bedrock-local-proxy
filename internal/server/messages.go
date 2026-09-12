@@ -109,7 +109,7 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 		result.Outcome = CompletionCanceled
 	}
 	if observed != nil {
-		result.InputTokens, result.OutputTokens, result.ObservedUncoveredBillingFields = parseMessagesUsage(observed)
+		applyCompletionUsage(&result, parseMessagesUsage(observed))
 		result.FunctionToolCalls = countMessageToolCalls(observed)
 	}
 	s.finishCompletion(started, result)
@@ -220,41 +220,73 @@ func (s *Server) writeAnthropicTransportError(w http.ResponseWriter, err error) 
 	s.writeAnthropicError(w, status, message, kind)
 }
 
-func parseMessagesUsage(body []byte) (*int64, *int64, bool) {
+func parseMessagesUsage(body []byte) completionUsage {
 	var response struct {
 		Usage map[string]json.RawMessage `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil || response.Usage == nil {
-		return nil, nil, false
+		return completionUsage{}
 	}
+	return parseMessagesUsageFields(response.Usage)
+}
+
+func parseMessagesUsageFields(usage map[string]json.RawMessage) completionUsage {
 	var inputTokens, outputTokens *int64
-	if raw, ok := response.Usage["input_tokens"]; ok {
+	if raw, ok := usage["input_tokens"]; ok {
 		inputTokens, _ = decodeOptionalInt64(raw)
 	}
-	if raw, ok := response.Usage["output_tokens"]; ok {
+	if raw, ok := usage["output_tokens"]; ok {
 		outputTokens, _ = decodeOptionalInt64(raw)
 	}
+	var cacheRead, cacheWrite *int64
 	uncovered := false
-	for key := range response.Usage {
-		if key != "input_tokens" && key != "output_tokens" {
+	if raw, ok := usage["cache_read_input_tokens"]; ok {
+		var valid bool
+		cacheRead, valid = decodeOptionalInt64(raw)
+		uncovered = uncovered || !valid
+	}
+	if raw, ok := usage["cache_creation_input_tokens"]; ok {
+		var valid bool
+		cacheWrite, valid = decodeOptionalInt64(raw)
+		uncovered = uncovered || !valid
+	}
+	if raw, ok := usage["cache_creation"]; ok {
+		detailedWrite, invalid := parseCacheCreationDetails(raw)
+		uncovered = uncovered || invalid
+		if cacheWrite == nil {
+			cacheWrite = detailedWrite
+		} else if detailedWrite != nil && *cacheWrite != *detailedWrite {
 			uncovered = true
-			break
 		}
 	}
-	return inputTokens, outputTokens, uncovered
+	for key, raw := range usage {
+		switch key {
+		case "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cache_creation":
+			continue
+		case "server_tool_use":
+			if billingValueNonzeroOrUnknown(raw) {
+				uncovered = true
+			}
+		default:
+			uncovered = true
+		}
+	}
+	return completionUsage{inputTokens: inputTokens, outputTokens: outputTokens, cacheReadInputTokens: cacheRead, cacheWriteInputTokens: cacheWrite, uncovered: uncovered}
 }
 
 // messagesStreamObserver understands the native Anthropic Messages stream.
 // The relay has already delivered every byte to the caller; this observer only
 // extracts terminal state and usage metadata from bounded SSE records.
 type messagesStreamObserver struct {
-	inputTokens  *int64
-	outputTokens *int64
-	uncovered    bool
-	usageInvalid bool
-	sawStop      bool
-	sawError     bool
-	toolCalls    int
+	inputTokens           *int64
+	outputTokens          *int64
+	cacheReadInputTokens  *int64
+	cacheWriteInputTokens *int64
+	uncovered             bool
+	usageInvalid          bool
+	sawStop               bool
+	sawError              bool
+	toolCalls             int
 }
 
 func (o *messagesStreamObserver) observe(event sseEvent) {
@@ -304,26 +336,88 @@ func (o *messagesStreamObserver) observeUsage(usage map[string]json.RawMessage) 
 	if usage == nil {
 		return
 	}
-	if raw, ok := usage["input_tokens"]; ok {
+	parsed := parseMessagesUsageFields(usage)
+	if parsed.inputTokens != nil {
+		o.inputTokens = parsed.inputTokens
+	}
+	if parsed.outputTokens != nil {
+		o.outputTokens = parsed.outputTokens
+	}
+	if parsed.cacheReadInputTokens != nil {
+		o.cacheReadInputTokens = parsed.cacheReadInputTokens
+	}
+	if parsed.cacheWriteInputTokens != nil {
+		o.cacheWriteInputTokens = parsed.cacheWriteInputTokens
+	}
+	o.uncovered = o.uncovered || parsed.uncovered
+}
+
+func parseCacheCreationDetails(raw json.RawMessage) (*int64, bool) {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, false
+	}
+	var details map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &details); err != nil {
+		return nil, true
+	}
+	var total int64
+	found := false
+	for key, raw := range details {
+		if key != "ephemeral_5m_input_tokens" && key != "ephemeral_1h_input_tokens" {
+			return nil, true
+		}
 		value, valid := decodeOptionalInt64(raw)
 		if !valid {
-			o.inputTokens = nil
-		} else {
-			o.inputTokens = value
+			return nil, true
+		}
+		if value != nil {
+			total += *value
+			found = true
 		}
 	}
-	if raw, ok := usage["output_tokens"]; ok {
-		value, valid := decodeOptionalInt64(raw)
-		if !valid {
-			o.outputTokens = nil
-		} else {
-			o.outputTokens = value
-		}
+	if !found {
+		return nil, false
 	}
-	for key := range usage {
-		if key != "input_tokens" && key != "output_tokens" {
-			o.uncovered = true
+	return &total, false
+}
+
+func billingValueNonzeroOrUnknown(raw json.RawMessage) bool {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return false
+	}
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return true
+	}
+	return billingValueNonzero(value)
+}
+
+func billingValueNonzero(value any) bool {
+	switch value := value.(type) {
+	case nil:
+		return false
+	case json.Number:
+		parsed, err := value.Float64()
+		return err != nil || parsed != 0
+	case map[string]any:
+		for _, item := range value {
+			if billingValueNonzero(item) {
+				return true
+			}
 		}
+		return false
+	case []any:
+		for _, item := range value {
+			if billingValueNonzero(item) {
+				return true
+			}
+		}
+		return false
+	default:
+		return true
 	}
 }
 
@@ -346,6 +440,8 @@ func (s *Server) serveMessagesStream(w http.ResponseWriter, r *http.Request, sta
 	if !observer.usageInvalid {
 		result.InputTokens = observer.inputTokens
 		result.OutputTokens = observer.outputTokens
+		result.CacheReadInputTokens = observer.cacheReadInputTokens
+		result.CacheWriteInputTokens = observer.cacheWriteInputTokens
 		result.ObservedUncoveredBillingFields = observer.uncovered
 	}
 	normalEnd := copyErr == nil || errors.Is(copyErr, io.EOF)

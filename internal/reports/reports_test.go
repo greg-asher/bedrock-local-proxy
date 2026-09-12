@@ -13,7 +13,7 @@ func TestGenerateAggregatesOnlyTheRequestedWindow(t *testing.T) {
 	parent := t.TempDir()
 	start := time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC)
 	writeSession(t, parent, "session-a", []event{
-		{Event: "request", Timestamp: start.Add(time.Hour).Format(time.RFC3339Nano), SessionTag: "nightly", Endpoint: "/v1/chat/completions", LocalModel: "coding", Outcome: "success", InputTokens: int64ptr(10), OutputTokens: int64ptr(20), EstimatedCost: float64ptr(0.03), UsageStatus: "known", CostStatus: "estimated", ClientFamily: "codex", ClientVersion: "0.142.5", MetadataProfile: "profile", MetadataRevision: "r1", CatalogHash: "catalog", ContextUtilization: float64ptr(0.1), OutputUtilization: float64ptr(0.2), FunctionToolCalls: 2},
+		{Event: "request", Timestamp: start.Add(time.Hour).Format(time.RFC3339Nano), SessionTag: "nightly", Endpoint: "/v1/chat/completions", LocalModel: "coding", Outcome: "success", InputTokens: int64ptr(10), OutputTokens: int64ptr(20), CacheReadInputTokens: int64ptr(4), CacheWriteInputTokens: int64ptr(5), EstimatedCost: float64ptr(0.03), UsageStatus: "known", CostStatus: "estimated", ClientFamily: "codex", ClientVersion: "0.142.5", MetadataProfile: "profile", MetadataRevision: "r1", CatalogHash: "catalog", ContextUtilization: float64ptr(0.1), OutputUtilization: float64ptr(0.2), FunctionToolCalls: 2},
 		{Event: "request", Timestamp: start.Add(2 * time.Hour).Format(time.RFC3339Nano), SessionTag: "nightly", Endpoint: "/v1/messages", LocalModel: "coding", Outcome: "canceled", UsageStatus: "unknown", CostStatus: "unavailable", ClientFamily: "claude-code", ClientVersion: "2.1.242", SettingsHash: "claude-settings"},
 		{Event: "request", Timestamp: start.Add(3 * time.Hour).Format(time.RFC3339Nano), SessionTag: "nightly", Endpoint: "/v1/models/coding", Outcome: "success"},
 	})
@@ -39,6 +39,9 @@ func TestGenerateAggregatesOnlyTheRequestedWindow(t *testing.T) {
 	if metrics.KnownInputTokens != 11 || metrics.KnownOutputTokens != 22 || metrics.KnownEstimatedCost != 0.05 || metrics.MissingUsageRequests != 1 || metrics.MissingCostRequests != 1 {
 		t.Fatalf("cost and token metrics = %+v", metrics)
 	}
+	if metrics.KnownCacheReadInputTokens != 4 || metrics.KnownCacheWriteInputTokens != 5 {
+		t.Fatalf("cache token metrics = %+v", metrics)
+	}
 	if metrics.FunctionToolCalls != 2 || metrics.UnsupportedFeatureRejections != 1 || metrics.AverageContextUtilization != 0.1 || metrics.AverageOutputUtilization != 0.2 {
 		t.Fatalf("compatibility metrics = %+v", metrics)
 	}
@@ -49,10 +52,24 @@ func TestGenerateAggregatesOnlyTheRequestedWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, text := range []string{"usage report", "Requests over time", "Estimated cost over time", "Model breakdown", "Client compatibility breakdown", "Metadata profile breakdown", "Catalog breakdown", "Claude settings breakdown", "claude-settings", "nightly"} {
+	for _, text := range []string{"usage report", "Requests over time", "Estimated cost over time", "Model breakdown", "Client compatibility breakdown", "Metadata profile breakdown", "Catalog breakdown", "Claude settings breakdown", "claude-settings", "nightly", "$0.0500 partial", "4 / 5 cache read / write"} {
 		if !strings.Contains(string(html), text) {
 			t.Fatalf("HTML does not contain %q", text)
 		}
+	}
+}
+
+func TestHTMLShowsUnavailableInsteadOfZeroWhenNoCostsAreKnown(t *testing.T) {
+	report := Report{
+		Metrics: Metrics{Requests: 1, MissingCostRequests: 1},
+		Models:  []Breakdown{{Name: "coding", Requests: 1, MissingCostRequests: 1}},
+	}
+	html, err := HTML(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(html), "unavailable") || strings.Contains(string(html), "$0.0000") || strings.Contains(string(html), "$0.000000") {
+		t.Fatalf("missing estimates rendered as zero: %s", html)
 	}
 }
 

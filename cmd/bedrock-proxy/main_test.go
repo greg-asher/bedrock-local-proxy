@@ -17,6 +17,7 @@ import (
 	"github.com/gregasher/bedrock-local-proxy/internal/accounting"
 	"github.com/gregasher/bedrock-local-proxy/internal/codex"
 	"github.com/gregasher/bedrock-local-proxy/internal/config"
+	"github.com/gregasher/bedrock-local-proxy/internal/reports"
 )
 
 type mainCodexRunner struct{}
@@ -258,6 +259,25 @@ func TestReportCommandWritesPeriodHTMLWithoutConfig(t *testing.T) {
 	info, err := os.Stat(output)
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("report permissions=%v err=%v", info.Mode(), err)
+	}
+}
+
+func TestPeriodCostSummaryShowsCoverage(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		metrics reports.Metrics
+		want    string
+	}{
+		{name: "empty", metrics: reports.Metrics{}, want: "n/a"},
+		{name: "unavailable", metrics: reports.Metrics{Requests: 2, MissingCostRequests: 2}, want: "unavailable"},
+		{name: "partial", metrics: reports.Metrics{Requests: 2, MissingCostRequests: 1, KnownEstimatedCost: 0.25}, want: "$0.250000 (partial)"},
+		{name: "complete", metrics: reports.Metrics{Requests: 2, KnownEstimatedCost: 0.5}, want: "$0.500000"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := periodCostSummary(test.metrics); got != test.want {
+				t.Fatalf("periodCostSummary()=%q want %q", got, test.want)
+			}
+		})
 	}
 }
 

@@ -452,8 +452,22 @@ func runReport(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "Report: %s\n", path)
 	fmt.Fprintf(stdout, "Period: %s to %s UTC\n", report.Start, report.Stop)
-	fmt.Fprintf(stdout, "Requests: %d · success rate: %s · estimated cost: $%.6f\n", report.Metrics.Requests, successRate(report.Metrics), report.Metrics.KnownEstimatedCost)
+	fmt.Fprintf(stdout, "Requests: %d · success rate: %s · estimated cost: %s\n", report.Metrics.Requests, successRate(report.Metrics), periodCostSummary(report.Metrics))
 	return 0
+}
+
+func periodCostSummary(metrics reports.Metrics) string {
+	if metrics.Requests == 0 {
+		return "n/a"
+	}
+	if metrics.MissingCostRequests >= metrics.Requests {
+		return "unavailable"
+	}
+	value := fmt.Sprintf("$%.6f", metrics.KnownEstimatedCost)
+	if metrics.MissingCostRequests > 0 {
+		return value + " (partial)"
+	}
+	return value
 }
 
 func parseReportTime(value string) (time.Time, error) {
