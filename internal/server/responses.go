@@ -114,7 +114,7 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request) {
 		result.Outcome = CompletionCanceled
 	}
 	if observed != nil {
-		result.InputTokens, result.OutputTokens, result.ObservedUncoveredBillingFields = parseResponsesUsage(observed)
+		applyCompletionUsage(&result, parseResponsesUsage(observed))
 		result.FunctionToolCalls = countResponseFunctionCalls(observed)
 	}
 	s.finishCompletion(started, result)
@@ -420,17 +420,17 @@ func countResponseFunctionCalls(body []byte) int {
 	return count
 }
 
-func parseResponsesUsage(body []byte) (*int64, *int64, bool) {
+func parseResponsesUsage(body []byte) completionUsage {
 	var response struct {
 		Usage map[string]json.RawMessage `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil || response.Usage == nil {
-		return nil, nil, false
+		return completionUsage{inputTokensIncludeCache: true}
 	}
 	return parseResponsesUsageFields(response.Usage)
 }
 
-func parseResponsesUsageFields(usage map[string]json.RawMessage) (*int64, *int64, bool) {
+func parseResponsesUsageFields(usage map[string]json.RawMessage) completionUsage {
 	var inputTokens, outputTokens *int64
 	if raw, ok := usage["input_tokens"]; ok {
 		inputTokens, _ = decodeOptionalInt64(raw)
@@ -438,24 +438,29 @@ func parseResponsesUsageFields(usage map[string]json.RawMessage) (*int64, *int64
 	if raw, ok := usage["output_tokens"]; ok {
 		outputTokens, _ = decodeOptionalInt64(raw)
 	}
-	uncovered := false
+	cacheRead, cacheWrite, uncovered := parseCacheDetails(usage["input_tokens_details"], "cached_tokens", "cache_write_tokens", nil)
+	if raw, ok := usage["output_tokens_details"]; ok {
+		uncovered = uncovered || detailsContainUnknownBilling(raw, map[string]bool{"reasoning_tokens": true})
+	}
 	for key := range usage {
-		if key != "input_tokens" && key != "output_tokens" && key != "total_tokens" {
+		if key != "input_tokens" && key != "output_tokens" && key != "total_tokens" && key != "input_tokens_details" && key != "output_tokens_details" {
 			uncovered = true
 			break
 		}
 	}
-	return inputTokens, outputTokens, uncovered
+	return completionUsage{inputTokens: inputTokens, outputTokens: outputTokens, cacheReadInputTokens: cacheRead, cacheWriteInputTokens: cacheWrite, inputTokensIncludeCache: true, uncovered: uncovered}
 }
 
 type responsesStreamObserver struct {
-	inputTokens   *int64
-	outputTokens  *int64
-	functionCalls int
-	uncovered     bool
-	sawTerminal   bool
-	sawSuccess    bool
-	sawFailure    bool
+	inputTokens           *int64
+	outputTokens          *int64
+	cacheReadInputTokens  *int64
+	cacheWriteInputTokens *int64
+	functionCalls         int
+	uncovered             bool
+	sawTerminal           bool
+	sawSuccess            bool
+	sawFailure            bool
 }
 
 func (o *responsesStreamObserver) observe(event sseEvent) {
@@ -524,27 +529,20 @@ func (o *responsesStreamObserver) observeUsage(raw []byte) {
 }
 
 func (o *responsesStreamObserver) setUsage(usage map[string]json.RawMessage) {
-	if raw, ok := usage["input_tokens"]; ok {
-		value, valid := decodeOptionalInt64(raw)
-		if valid {
-			o.inputTokens = value
-		} else {
-			o.inputTokens = nil
-		}
+	parsed := parseResponsesUsageFields(usage)
+	if parsed.inputTokens != nil {
+		o.inputTokens = parsed.inputTokens
 	}
-	if raw, ok := usage["output_tokens"]; ok {
-		value, valid := decodeOptionalInt64(raw)
-		if valid {
-			o.outputTokens = value
-		} else {
-			o.outputTokens = nil
-		}
+	if parsed.outputTokens != nil {
+		o.outputTokens = parsed.outputTokens
 	}
-	for key := range usage {
-		if key != "input_tokens" && key != "output_tokens" && key != "total_tokens" {
-			o.uncovered = true
-		}
+	if parsed.cacheReadInputTokens != nil {
+		o.cacheReadInputTokens = parsed.cacheReadInputTokens
 	}
+	if parsed.cacheWriteInputTokens != nil {
+		o.cacheWriteInputTokens = parsed.cacheWriteInputTokens
+	}
+	o.uncovered = o.uncovered || parsed.uncovered
 }
 
 func (s *Server) serveResponsesStream(w http.ResponseWriter, r *http.Request, started time.Time, localModel string, response *http.Response) {
@@ -569,6 +567,9 @@ func (s *Server) serveResponsesStream(w http.ResponseWriter, r *http.Request, st
 		Outcome:                        CompletionFailed,
 		InputTokens:                    observer.inputTokens,
 		OutputTokens:                   observer.outputTokens,
+		CacheReadInputTokens:           observer.cacheReadInputTokens,
+		CacheWriteInputTokens:          observer.cacheWriteInputTokens,
+		InputTokensIncludeCache:        true,
 		ObservedUncoveredBillingFields: observer.uncovered,
 		FunctionToolCalls:              observer.functionCalls,
 	}

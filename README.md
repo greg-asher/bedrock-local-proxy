@@ -81,6 +81,9 @@ models:
     bedrock_model_id: REPLACE_WITH_YOUR_BEDROCK_MODEL_ID
     input_per_million: 0
     output_per_million: 0
+    # Replace these too when this model uses prompt caching.
+    # cache_read_input_per_million: REPLACE_WITH_DOCUMENTED_PRICE
+    # cache_write_input_per_million: REPLACE_WITH_DOCUMENTED_PRICE
     temperature: 0.2
     max_tokens: 8192
 
@@ -134,6 +137,8 @@ Configuration fields:
 | `models.<alias>.bedrock_model_id` | yes | Bedrock model ID or inference-profile ID. |
 | `models.<alias>.input_per_million` | no | Input price in dollars per million tokens, used only for estimated logs. `0` is valid. |
 | `models.<alias>.output_per_million` | no | Output price in dollars per million tokens, used only for estimated logs. `0` is valid. |
+| `models.<alias>.cache_read_input_per_million` | no | Prompt-cache read price in dollars per million tokens. Required for an estimate when a response reports a nonzero cache-read count. |
+| `models.<alias>.cache_write_input_per_million` | no | Prompt-cache write price in dollars per million tokens. Required for an estimate when a response reports a nonzero cache-write count. |
 | `models.<alias>.temperature` | no | Default temperature inserted only when the request omits it. |
 | `models.<alias>.max_tokens` | no | Default output-token limit inserted only when the request omits it. |
 | `models.<alias>.capabilities.metadata_profile` | generated client metadata | Exact bundled metadata profile. Profiles are matched only by name or exact Bedrock target ID. |
@@ -146,7 +151,9 @@ Configuration fields:
 | `models.<alias>.capabilities.reasoning` | generated client metadata | Whether adjustable reasoning is supported and the exact supported efforts. |
 | `models.<alias>.capabilities.tools` | generated client metadata | Client-side function-calling and parallel-call support. |
 
-Prices are never fetched automatically. If the upstream response does not contain both token counts, or either price is omitted, the log reports the estimate as unavailable rather than treating it as zero. Keep model aliases free of surrounding whitespace and use finite, nonnegative prices.
+Prices are never fetched automatically. If the upstream response does not contain both token counts, either base price is omitted, or a reported nonzero cache dimension has no configured price, the request estimate is unavailable rather than zero. Keep model aliases free of surrounding whitespace and use finite, nonnegative prices.
+
+The proxy calculates cost while it records each request. For Responses and Chat Completions, the reported input total includes cache-read and cache-write tokens, so the proxy subtracts those subsets before applying the normal input rate and then prices each cache subset separately. Anthropic Messages reports uncached input, cache reads, and cache writes as separate counts, so all three are priced directly. Output reasoning tokens remain part of the output total. Restart the proxy after changing prices; period reports aggregate the estimates stored in session events and do not reprice older sessions.
 
 Capability numbers in the example are placeholders, not proxy defaults. Client configuration generation requires complete resolved metadata and confirmed protocol support, then fails with the missing fields rather than guessing. Exact bundled profiles currently cover [`openai.gpt-oss-120b-1:0`](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-oss-120b.html), [`openai.gpt-oss-20b-1:0`](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-oss-20b.html), and [Claude Sonnet 4.5](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-4-5.html), including their listed inference IDs. GPT OSS profiles declare Responses support and Messages incompatibility; the Claude profile declares Messages support, its canonical Anthropic identity, and Responses incompatibility. Explicit values take precedence over a compatible profile for model limits, but cannot turn on an API that AWS documents as unsupported. Existing version `1` configurations without `capabilities` continue to serve manual client configurations when their upstream target supports the requested route.
 
@@ -184,7 +191,7 @@ Successful startup prints the local URL, AWS profile, Bedrock region, configured
 
 Every run writes a private report by default. The parent directory is `$XDG_STATE_HOME/bedrock-proxy/sessions` when `XDG_STATE_HOME` is an absolute path, otherwise `~/.local/state/bedrock-proxy/sessions`. Use `reporting.directory` for a persistent override or `--report-dir` for one run; relative CLI paths resolve from the current directory.
 
-Each report contains `session.json`, `events.jsonl`, and `summary.json`. The report retains request outcome, endpoint, alias, configured Bedrock target ID, latency, status, observed token counts, and estimated cost. It does not retain the AWS profile, prompts, completions, tool content, request bodies, headers, credentials, or raw upstream errors. Report directories use owner-only permissions and recognized reports older than 30 days are removed when the proxy starts. Cleanup warnings do not stop the proxy.
+Each report contains `session.json`, `events.jsonl`, and `summary.json`. The report retains request outcome, endpoint, alias, configured Bedrock target ID, latency, status, observed input, output, cache-read and cache-write token counts, and estimated cost. It does not retain the AWS profile, prompts, completions, tool content, request bodies, headers, credentials, or raw upstream errors. Report directories use owner-only permissions and recognized reports older than 30 days are removed when the proxy starts. Cleanup warnings do not stop the proxy.
 
 ## Create a period report
 
@@ -196,7 +203,7 @@ bedrock-proxy report \
   --stop 2026-09-08T00:00:00Z
 ```
 
-`--start` is inclusive and `--stop` is exclusive, so adjacent reports do not double-count requests. Both accept RFC3339 timestamps or `YYYY-MM-DD`. The default report is an owner-only HTML file under `<report-parent>/summaries`; the command prints its absolute path. Use `--report-dir` to read a different report parent, `--config` to use a configuration file’s `reporting.directory`, `--output PATH` to choose the output file, or `--format json` for the structured aggregate without charts.
+`--start` is inclusive and `--stop` is exclusive, so adjacent reports do not double-count requests. Both accept RFC3339 timestamps or `YYYY-MM-DD`. The default report is an owner-only HTML file under `<report-parent>/summaries`; the command prints its absolute path. Use `--report-dir` to read a different report parent, `--config` to use a configuration file’s `reporting.directory`, `--output PATH` to choose the output file, or `--format json` for the structured aggregate without charts. A report labels cost as `partial` when only some requests have estimates and `unavailable` when none do, instead of displaying a misleading zero.
 
 The local API is available at:
 

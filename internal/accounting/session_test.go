@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -37,11 +38,17 @@ func TestSessionReporterWritesPrivateSafeReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	var terminal bytes.Buffer
-	recorder := New(&terminal, FormatJSON, map[string]config.ModelConfig{"coding": {BedrockModelID: "anthropic.claude-test"}})
+	inputPrice, outputPrice := 2.0, 3.0
+	cacheReadPrice, cacheWritePrice := 0.2, 2.5
+	recorder := New(&terminal, FormatJSON, map[string]config.ModelConfig{"coding": {
+		BedrockModelID: "anthropic.claude-test", InputPerMillion: &inputPrice, OutputPerMillion: &outputPrice,
+		CacheReadInputPerMillion: &cacheReadPrice, CacheWriteInputPerMillion: &cacheWritePrice,
+	}})
 	recorder.SetSessionReporter(reporter)
 	status := 200
 	input, output := int64(3), int64(4)
-	recorder.Record(server.CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: "coding", UpstreamModel: "anthropic.claude-test", HTTPStatus: &status, Outcome: server.CompletionSucceeded, InputTokens: &input, OutputTokens: &output, ClientFamily: "codex", ClientVersion: "0.142.5", MetadataProfile: "test-profile", MetadataRevision: "r1", CatalogHash: strings.Repeat("a", 64), ContextWindow: 100, MaxOutputTokens: 20, FunctionToolCalls: 1})
+	cacheRead, cacheWrite := int64(1), int64(1)
+	recorder.Record(server.CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: "coding", UpstreamModel: "anthropic.claude-test", HTTPStatus: &status, Outcome: server.CompletionSucceeded, InputTokens: &input, OutputTokens: &output, CacheReadInputTokens: &cacheRead, CacheWriteInputTokens: &cacheWrite, InputTokensIncludeCache: true, ClientFamily: "codex", ClientVersion: "0.142.5", MetadataProfile: "test-profile", MetadataRevision: "r1", CatalogHash: strings.Repeat("a", 64), ContextWindow: 100, MaxOutputTokens: 20, FunctionToolCalls: 1})
 	recorder.Record(server.CompletionResult{Endpoint: "/v1/messages", LocalModel: "coding", Outcome: server.CompletionCanceled, ClientFamily: "claude-code", ClientVersion: "2.1.242", SettingsHash: strings.Repeat("b", 64)})
 	recorder.Record(server.CompletionResult{Endpoint: "/v1/models", HTTPStatus: &status, Outcome: server.CompletionSucceeded})
 	recorder.WriteSummary()
@@ -81,6 +88,9 @@ func TestSessionReporterWritesPrivateSafeReport(t *testing.T) {
 	if summary.SessionTag != info.SessionTag || summary.Status != string(SessionCompleted) || summary.FinishedAt == "" || summary.Requests != 2 || summary.Successes != 1 || summary.Failures != 1 {
 		t.Fatalf("summary = %+v", summary)
 	}
+	if summary.KnownCacheReadInputTokens != 1 || summary.KnownCacheWriteInputTokens != 1 || math.Abs(summary.KnownEstimatedCost-0.0000167) > 1e-12 || summary.CostStatus != "partial" {
+		t.Fatalf("cache-aware summary = %+v", summary)
+	}
 	data, err := os.ReadFile(filepath.Join(info.Directory, "events.jsonl"))
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +109,7 @@ func TestSessionReporterWritesPrivateSafeReport(t *testing.T) {
 		}
 	}
 	all := string(data)
-	if !strings.Contains(all, `"client_family":"codex"`) || !strings.Contains(all, `"catalog_hash":"`+strings.Repeat("a", 64)+`"`) || !strings.Contains(all, `"client_family":"claude-code"`) || !strings.Contains(all, `"settings_hash":"`+strings.Repeat("b", 64)+`"`) || !strings.Contains(all, `"function_tool_calls":1`) {
+	if !strings.Contains(all, `"client_family":"codex"`) || !strings.Contains(all, `"catalog_hash":"`+strings.Repeat("a", 64)+`"`) || !strings.Contains(all, `"client_family":"claude-code"`) || !strings.Contains(all, `"settings_hash":"`+strings.Repeat("b", 64)+`"`) || !strings.Contains(all, `"function_tool_calls":1`) || !strings.Contains(all, `"cache_read_input_tokens":1`) || !strings.Contains(all, `"cache_write_input_tokens":1`) || !strings.Contains(all, `"estimated_cost":0.0000167`) {
 		t.Fatalf("report omitted safe compatibility metadata: %s", all)
 	}
 	for _, sentinel := range []string{"prompt-secret", "completion-secret", "tool-secret", "credential-secret", "header-secret", "raw-upstream-error"} {

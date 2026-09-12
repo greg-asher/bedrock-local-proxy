@@ -133,7 +133,7 @@ func TestChatCompletionDoesNotAddLegacyTokenDefaultAlongsideMaxCompletionTokens(
 }
 
 func TestChatCompletionPreservesResponseAndRecordsUsage(t *testing.T) {
-	const responseBody = `{"id":"chatcmpl-test","object":"chat.completion","created":1730000000,"model":"target","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19,"prompt_tokens_details":{"cached_tokens":2}}}`
+	const responseBody = `{"id":"chatcmpl-test","object":"chat.completion","created":1730000000,"model":"target","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19,"prompt_tokens_details":{"cached_tokens":2,"audio_tokens":0}}}`
 	fake := &fakeRequestDoer{response: &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}, "X-Request-Id": []string{"req-123"}},
@@ -153,15 +153,22 @@ func TestChatCompletionPreservesResponseAndRecordsUsage(t *testing.T) {
 	if result.Outcome != CompletionSucceeded || result.HTTPStatus == nil || *result.HTTPStatus != http.StatusOK {
 		t.Fatalf("completion result = %+v, want successful 200", result)
 	}
-	if result.InputTokens == nil || *result.InputTokens != 12 || result.OutputTokens == nil || *result.OutputTokens != 7 || !result.ObservedUncoveredBillingFields {
-		t.Fatalf("usage result = %+v, want token totals and uncovered billing dimension", result)
+	if result.InputTokens == nil || *result.InputTokens != 12 || result.OutputTokens == nil || *result.OutputTokens != 7 || result.CacheReadInputTokens == nil || *result.CacheReadInputTokens != 2 || result.ObservedUncoveredBillingFields || !result.InputTokensIncludeCache {
+		t.Fatalf("usage result = %+v, want cache-aware token totals", result)
 	}
 }
 
 func TestUsageParsingTreatsNegativeCountsAsUnknown(t *testing.T) {
-	input, output, uncovered := parseChatUsage([]byte(`{"usage":{"prompt_tokens":-1,"completion_tokens":2,"total_tokens":1}}`))
-	if input != nil || output == nil || *output != 2 || uncovered {
-		t.Fatalf("usage = input:%v output:%v uncovered:%v, want negative input unknown and valid output preserved", input, output, uncovered)
+	usage := parseChatUsage([]byte(`{"usage":{"prompt_tokens":-1,"completion_tokens":2,"total_tokens":1}}`))
+	if usage.inputTokens != nil || usage.outputTokens == nil || *usage.outputTokens != 2 || usage.uncovered {
+		t.Fatalf("usage = %+v, want negative input unknown and valid output preserved", usage)
+	}
+}
+
+func TestUsageParsingRejectsUnknownNonzeroBillingDimensions(t *testing.T) {
+	usage := parseChatUsage([]byte(`{"usage":{"prompt_tokens":2,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":0,"future_billed_tokens":1}}}`))
+	if !usage.uncovered {
+		t.Fatalf("usage = %+v, want nonzero unknown billing dimension to disable estimates", usage)
 	}
 }
 

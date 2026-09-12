@@ -44,6 +44,9 @@ type CompletionResult struct {
 	Outcome                        CompletionOutcome
 	InputTokens                    *int64
 	OutputTokens                   *int64
+	CacheReadInputTokens           *int64
+	CacheWriteInputTokens          *int64
+	InputTokensIncludeCache        bool
 	ObservedUncoveredBillingFields bool
 	ClientFamily                   string
 	ClientVersion                  string
@@ -55,6 +58,24 @@ type CompletionResult struct {
 	MetadataRevision               string
 	CatalogHash                    string
 	SettingsHash                   string
+}
+
+type completionUsage struct {
+	inputTokens             *int64
+	outputTokens            *int64
+	cacheReadInputTokens    *int64
+	cacheWriteInputTokens   *int64
+	inputTokensIncludeCache bool
+	uncovered               bool
+}
+
+func applyCompletionUsage(result *CompletionResult, usage completionUsage) {
+	result.InputTokens = usage.inputTokens
+	result.OutputTokens = usage.outputTokens
+	result.CacheReadInputTokens = usage.cacheReadInputTokens
+	result.CacheWriteInputTokens = usage.cacheWriteInputTokens
+	result.InputTokensIncludeCache = usage.inputTokensIncludeCache
+	result.ObservedUncoveredBillingFields = usage.uncovered
 }
 
 const maxUsageObservationBytes = 1 << 20
@@ -153,7 +174,7 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 		result.Outcome = CompletionCanceled
 	}
 	if observed != nil {
-		result.InputTokens, result.OutputTokens, result.ObservedUncoveredBillingFields = parseChatUsage(observed)
+		applyCompletionUsage(&result, parseChatUsage(observed))
 	}
 	s.finishCompletion(started, result)
 }
@@ -452,12 +473,14 @@ func (p *sseParser) dispatch() {
 }
 
 type chatStreamObserver struct {
-	inputTokens  *int64
-	outputTokens *int64
-	uncovered    bool
-	usageInvalid bool
-	sawDone      bool
-	sawError     bool
+	inputTokens           *int64
+	outputTokens          *int64
+	cacheReadInputTokens  *int64
+	cacheWriteInputTokens *int64
+	uncovered             bool
+	usageInvalid          bool
+	sawDone               bool
+	sawError              bool
 }
 
 func (o *chatStreamObserver) observe(event sseEvent) {
@@ -508,8 +531,16 @@ func (o *chatStreamObserver) observe(event sseEvent) {
 			o.outputTokens = value
 		}
 	}
+	if raw, ok := usage["prompt_tokens_details"]; ok {
+		read, write, uncovered := parseCacheDetails(raw, "cached_tokens", "cache_write_tokens", nil)
+		o.cacheReadInputTokens, o.cacheWriteInputTokens = read, write
+		o.uncovered = o.uncovered || uncovered
+	}
+	if raw, ok := usage["completion_tokens_details"]; ok {
+		o.uncovered = o.uncovered || detailsContainUnknownBilling(raw, map[string]bool{"reasoning_tokens": true, "accepted_prediction_tokens": true, "rejected_prediction_tokens": true})
+	}
 	for key := range usage {
-		if key != "prompt_tokens" && key != "completion_tokens" && key != "total_tokens" {
+		if key != "prompt_tokens" && key != "completion_tokens" && key != "total_tokens" && key != "prompt_tokens_details" && key != "completion_tokens_details" {
 			o.uncovered = true
 		}
 	}
@@ -539,6 +570,9 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, started
 	if !observer.usageInvalid {
 		result.InputTokens = observer.inputTokens
 		result.OutputTokens = observer.outputTokens
+		result.CacheReadInputTokens = observer.cacheReadInputTokens
+		result.CacheWriteInputTokens = observer.cacheWriteInputTokens
+		result.InputTokensIncludeCache = true
 		result.ObservedUncoveredBillingFields = observer.uncovered
 	}
 	normalEnd := copyErr == nil || errors.Is(copyErr, io.EOF)
@@ -551,26 +585,73 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, started
 	s.finishCompletion(started, result)
 }
 
-func parseChatUsage(body []byte) (*int64, *int64, bool) {
+func parseChatUsage(body []byte) completionUsage {
 	var response struct {
 		Usage map[string]json.RawMessage `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil || response.Usage == nil {
-		return nil, nil, false
+		return completionUsage{inputTokensIncludeCache: true}
 	}
 	input, _ := decodeOptionalInt64(response.Usage["prompt_tokens"])
 	output, _ := decodeOptionalInt64(response.Usage["completion_tokens"])
 	uncovered := false
-	for key, raw := range response.Usage {
-		if key == "prompt_tokens" || key == "completion_tokens" || key == "total_tokens" {
-			continue
-		}
-		if (key == "prompt_tokens_details" || key == "completion_tokens_details") && string(bytes.TrimSpace(raw)) == "null" {
+	cacheRead, cacheWrite, cacheUncovered := parseCacheDetails(response.Usage["prompt_tokens_details"], "cached_tokens", "cache_write_tokens", nil)
+	uncovered = uncovered || cacheUncovered
+	if raw, ok := response.Usage["completion_tokens_details"]; ok {
+		uncovered = uncovered || detailsContainUnknownBilling(raw, map[string]bool{"reasoning_tokens": true, "accepted_prediction_tokens": true, "rejected_prediction_tokens": true})
+	}
+	for key := range response.Usage {
+		if key == "prompt_tokens" || key == "completion_tokens" || key == "total_tokens" || key == "prompt_tokens_details" || key == "completion_tokens_details" {
 			continue
 		}
 		uncovered = true
 	}
-	return input, output, uncovered
+	return completionUsage{inputTokens: input, outputTokens: output, cacheReadInputTokens: cacheRead, cacheWriteInputTokens: cacheWrite, inputTokensIncludeCache: true, uncovered: uncovered}
+}
+
+func parseCacheDetails(raw json.RawMessage, readKey, writeKey string, additionalKnown map[string]bool) (*int64, *int64, bool) {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil, false
+	}
+	var details map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &details); err != nil {
+		return nil, nil, true
+	}
+	var read, write *int64
+	uncovered := false
+	for key, value := range details {
+		switch key {
+		case readKey:
+			var valid bool
+			read, valid = decodeOptionalInt64(value)
+			uncovered = uncovered || !valid
+		case writeKey:
+			var valid bool
+			write, valid = decodeOptionalInt64(value)
+			uncovered = uncovered || !valid
+		default:
+			if (additionalKnown == nil || !additionalKnown[key]) && billingValueNonzeroOrUnknown(value) {
+				uncovered = true
+			}
+		}
+	}
+	return read, write, uncovered
+}
+
+func detailsContainUnknownBilling(raw json.RawMessage, known map[string]bool) bool {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return false
+	}
+	var details map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &details); err != nil {
+		return true
+	}
+	for key, value := range details {
+		if !known[key] && billingValueNonzeroOrUnknown(value) {
+			return true
+		}
+	}
+	return false
 }
 
 // decodeOptionalInt64 preserves the JSON distinction between a valid numeric

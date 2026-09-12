@@ -432,6 +432,18 @@ func TestValidateRejectsNonLoopbackAndInvalidValues(t *testing.T) {
 			model.InputPerMillion = &v
 			c.Models["coding"] = model
 		}, "finite nonnegative"},
+		{"negative cache read price", func(c *Config) {
+			v := -0.1
+			model := c.Models["coding"]
+			model.CacheReadInputPerMillion = &v
+			c.Models["coding"] = model
+		}, "cache_read_input_per_million"},
+		{"non-finite cache write price", func(c *Config) {
+			v := math.Inf(1)
+			model := c.Models["coding"]
+			model.CacheWriteInputPerMillion = &v
+			c.Models["coding"] = model
+		}, "cache_write_input_per_million"},
 		{"non-finite temperature", func(c *Config) {
 			v := math.Inf(1)
 			model := c.Models["coding"]

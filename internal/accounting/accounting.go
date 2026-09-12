@@ -21,12 +21,13 @@ const (
 )
 
 type totals struct {
-	requests, successes, failures            int
-	knownInputTokens, knownOutputTokens      int64
-	knownEstimatedCost                       float64
-	missingUsageRequests, missingEstimates   int
-	incompleteRequests                       int
-	functionToolCalls, unsupportedRejections int
+	requests, successes, failures               int
+	knownInputTokens, knownOutputTokens         int64
+	knownCacheReadTokens, knownCacheWriteTokens int64
+	knownEstimatedCost                          float64
+	missingUsageRequests, missingEstimates      int
+	incompleteRequests                          int
+	functionToolCalls, unsupportedRejections    int
 }
 
 type Recorder struct {
@@ -52,6 +53,8 @@ type requestRecord struct {
 	Outcome                        string   `json:"outcome"`
 	InputTokens                    *int64   `json:"input_tokens,omitempty"`
 	OutputTokens                   *int64   `json:"output_tokens,omitempty"`
+	CacheReadInputTokens           *int64   `json:"cache_read_input_tokens,omitempty"`
+	CacheWriteInputTokens          *int64   `json:"cache_write_input_tokens,omitempty"`
 	EstimatedCost                  *float64 `json:"estimated_cost,omitempty"`
 	CostStatus                     string   `json:"cost_status"`
 	UsageStatus                    string   `json:"usage_status"`
@@ -81,6 +84,8 @@ type summaryRecord struct {
 	Failures                     int     `json:"failures"`
 	KnownInputTokens             int64   `json:"known_input_tokens"`
 	KnownOutputTokens            int64   `json:"known_output_tokens"`
+	KnownCacheReadInputTokens    int64   `json:"known_cache_read_input_tokens"`
+	KnownCacheWriteInputTokens   int64   `json:"known_cache_write_input_tokens"`
 	KnownEstimatedCost           float64 `json:"known_estimated_cost"`
 	MissingUsageRequests         int     `json:"missing_usage_requests"`
 	MissingEstimateRequests      int     `json:"missing_estimate_requests"`
@@ -116,12 +121,17 @@ func (r *Recorder) Record(result server.CompletionResult) {
 	entry := requestRecord{Event: "request", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Endpoint: result.Endpoint,
 		LocalModel: result.LocalModel, UpstreamModel: result.UpstreamModel, LatencyMS: float64(result.Elapsed) / float64(time.Millisecond),
 		HTTPStatus: result.HTTPStatus, Outcome: string(result.Outcome), InputTokens: input, OutputTokens: output,
+		CacheReadInputTokens: result.CacheReadInputTokens, CacheWriteInputTokens: result.CacheWriteInputTokens,
 		CostStatus: "unavailable", UsageStatus: usageStatus, ObservedUncoveredBillingFields: result.ObservedUncoveredBillingFields,
 		ClientFamily: result.ClientFamily, ClientVersion: result.ClientVersion, MetadataProfile: result.MetadataProfile,
 		MetadataRevision: result.MetadataRevision, CatalogHash: result.CatalogHash, SettingsHash: result.SettingsHash, FunctionToolCalls: result.FunctionToolCalls,
 		UnsupportedFeatureRejections: result.UnsupportedFeatureRejections}
 	if input != nil && output != nil && result.ContextWindow > 0 {
-		value := float64(*input+*output) / float64(result.ContextWindow)
+		contextInput := *input
+		if !result.InputTokensIncludeCache {
+			contextInput += tokenCount(result.CacheReadInputTokens) + tokenCount(result.CacheWriteInputTokens)
+		}
+		value := float64(contextInput+*output) / float64(result.ContextWindow)
 		entry.ContextUtilization = &value
 	}
 	if output != nil && result.MaxOutputTokens > 0 {
@@ -147,6 +157,12 @@ func (r *Recorder) Record(result server.CompletionResult) {
 		if output != nil {
 			r.totals.knownOutputTokens += *output
 		}
+		if result.CacheReadInputTokens != nil {
+			r.totals.knownCacheReadTokens += *result.CacheReadInputTokens
+		}
+		if result.CacheWriteInputTokens != nil {
+			r.totals.knownCacheWriteTokens += *result.CacheWriteInputTokens
+		}
 		if usageStatus != "known" {
 			r.totals.missingUsageRequests++
 		}
@@ -166,7 +182,7 @@ func (r *Recorder) Record(result server.CompletionResult) {
 			_ = json.NewEncoder(r.w).Encode(entry)
 			return
 		}
-		_, _ = fmt.Fprintf(r.w, "request event=%s timestamp=%s endpoint=%s local_model=%s upstream_model=%s outcome=%s http_status=%s latency_ms=%.2f input_tokens=%s output_tokens=%s usage_status=%s estimated_cost=%s cost_status=%s\n", entry.Event, entry.Timestamp, entry.Endpoint, entry.LocalModel, entry.UpstreamModel, entry.Outcome, statusText(entry.HTTPStatus), entry.LatencyMS, tokenText(entry.InputTokens), tokenText(entry.OutputTokens), entry.UsageStatus, costText(entry), entry.CostStatus)
+		_, _ = fmt.Fprintf(r.w, "request event=%s timestamp=%s endpoint=%s local_model=%s upstream_model=%s outcome=%s http_status=%s latency_ms=%.2f input_tokens=%s output_tokens=%s cache_read_input_tokens=%s cache_write_input_tokens=%s usage_status=%s estimated_cost=%s cost_status=%s\n", entry.Event, entry.Timestamp, entry.Endpoint, entry.LocalModel, entry.UpstreamModel, entry.Outcome, statusText(entry.HTTPStatus), entry.LatencyMS, tokenText(entry.InputTokens), tokenText(entry.OutputTokens), tokenText(entry.CacheReadInputTokens), tokenText(entry.CacheWriteInputTokens), entry.UsageStatus, costText(entry), entry.CostStatus)
 	}
 }
 
@@ -175,7 +191,36 @@ func (r *Recorder) estimate(result server.CompletionResult) (float64, bool) {
 	if !ok || result.InputTokens == nil || result.OutputTokens == nil || result.ObservedUncoveredBillingFields || model.InputPerMillion == nil || model.OutputPerMillion == nil {
 		return 0, false
 	}
-	return float64(*result.InputTokens)/1e6*(*model.InputPerMillion) + float64(*result.OutputTokens)/1e6*(*model.OutputPerMillion), true
+	cacheRead := tokenCount(result.CacheReadInputTokens)
+	cacheWrite := tokenCount(result.CacheWriteInputTokens)
+	input := *result.InputTokens
+	if result.InputTokensIncludeCache {
+		input -= cacheRead + cacheWrite
+		if input < 0 {
+			return 0, false
+		}
+	}
+	if cacheRead > 0 && model.CacheReadInputPerMillion == nil {
+		return 0, false
+	}
+	if cacheWrite > 0 && model.CacheWriteInputPerMillion == nil {
+		return 0, false
+	}
+	cost := float64(input)/1e6*(*model.InputPerMillion) + float64(*result.OutputTokens)/1e6*(*model.OutputPerMillion)
+	if cacheRead > 0 {
+		cost += float64(cacheRead) / 1e6 * (*model.CacheReadInputPerMillion)
+	}
+	if cacheWrite > 0 {
+		cost += float64(cacheWrite) / 1e6 * (*model.CacheWriteInputPerMillion)
+	}
+	return cost, true
+}
+
+func tokenCount(value *int64) int64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func (r *Recorder) WriteSummary() {
@@ -183,11 +228,14 @@ func (r *Recorder) WriteSummary() {
 	defer r.mu.Unlock()
 	s := summaryRecord{Event: "summary", RuntimeSeconds: time.Since(r.started).Seconds(), Requests: r.totals.requests, Successes: r.totals.successes, Failures: r.totals.failures,
 		KnownInputTokens: r.totals.knownInputTokens, KnownOutputTokens: r.totals.knownOutputTokens, KnownEstimatedCost: r.totals.knownEstimatedCost,
+		KnownCacheReadInputTokens: r.totals.knownCacheReadTokens, KnownCacheWriteInputTokens: r.totals.knownCacheWriteTokens,
 		MissingUsageRequests: r.totals.missingUsageRequests, MissingEstimateRequests: r.totals.missingEstimates, IncompleteRequests: r.totals.incompleteRequests, CostStatus: "unavailable"}
 	s.FunctionToolCalls = r.totals.functionToolCalls
 	s.UnsupportedFeatureRejections = r.totals.unsupportedRejections
-	if r.totals.missingEstimates == 0 && r.totals.requests > 0 {
+	if r.totals.requests > 0 && r.totals.missingEstimates == 0 {
 		s.CostStatus = "estimated"
+	} else if r.totals.requests > r.totals.missingEstimates {
+		s.CostStatus = "partial"
 	}
 	if r.session != nil {
 		r.session.StageSummary(s)
@@ -200,8 +248,10 @@ func (r *Recorder) WriteSummary() {
 		cost := "unavailable"
 		if s.CostStatus == "estimated" {
 			cost = fmt.Sprintf("$%.8f (estimated)", s.KnownEstimatedCost)
+		} else if s.CostStatus == "partial" {
+			cost = fmt.Sprintf("$%.8f (partial estimate)", s.KnownEstimatedCost)
 		}
-		_, _ = fmt.Fprintf(r.w, "Session summary runtime=%.1fs requests=%d successes=%d failures=%d known_input_tokens=%d known_output_tokens=%d estimated_cost=%s missing_usage=%d missing_estimates=%d incomplete_requests=%d\n", s.RuntimeSeconds, s.Requests, s.Successes, s.Failures, s.KnownInputTokens, s.KnownOutputTokens, cost, s.MissingUsageRequests, s.MissingEstimateRequests, s.IncompleteRequests)
+		_, _ = fmt.Fprintf(r.w, "Session summary runtime=%.1fs requests=%d successes=%d failures=%d known_input_tokens=%d known_output_tokens=%d known_cache_read_input_tokens=%d known_cache_write_input_tokens=%d estimated_cost=%s missing_usage=%d missing_estimates=%d incomplete_requests=%d\n", s.RuntimeSeconds, s.Requests, s.Successes, s.Failures, s.KnownInputTokens, s.KnownOutputTokens, s.KnownCacheReadInputTokens, s.KnownCacheWriteInputTokens, cost, s.MissingUsageRequests, s.MissingEstimateRequests, s.IncompleteRequests)
 	}
 }
 

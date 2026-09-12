@@ -82,7 +82,7 @@ func TestMessagesAppliesOnlyAbsentConfiguredDefaults(t *testing.T) {
 }
 
 func TestMessagesPreservesResponseAndRecordsUsage(t *testing.T) {
-	const responseBody = `{"id":"msg_test","type":"message","role":"assistant","content":[{"type":"text","text":"hello"}],"model":"target","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":7,"cache_read_input_tokens":3}}`
+	const responseBody = `{"id":"msg_test","type":"message","role":"assistant","content":[{"type":"text","text":"hello"}],"model":"target","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":7,"cache_read_input_tokens":3,"cache_creation_input_tokens":2,"cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":0}}}`
 	fake := &fakeRequestDoer{response: &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}, "X-Request-Id": []string{"req-123"}},
@@ -102,8 +102,8 @@ func TestMessagesPreservesResponseAndRecordsUsage(t *testing.T) {
 	if result.Endpoint != "/v1/messages" || result.Outcome != CompletionSucceeded || result.HTTPStatus == nil || *result.HTTPStatus != http.StatusOK {
 		t.Fatalf("completion result = %+v, want successful Messages completion", result)
 	}
-	if result.InputTokens == nil || *result.InputTokens != 12 || result.OutputTokens == nil || *result.OutputTokens != 7 || !result.ObservedUncoveredBillingFields {
-		t.Fatalf("usage result = %+v, want token totals and cache dimension", result)
+	if result.InputTokens == nil || *result.InputTokens != 12 || result.OutputTokens == nil || *result.OutputTokens != 7 || result.CacheReadInputTokens == nil || *result.CacheReadInputTokens != 3 || result.CacheWriteInputTokens == nil || *result.CacheWriteInputTokens != 2 || result.ObservedUncoveredBillingFields || result.InputTokensIncludeCache {
+		t.Fatalf("usage result = %+v, want cache-aware token totals", result)
 	}
 }
 
