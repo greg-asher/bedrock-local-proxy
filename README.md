@@ -137,8 +137,8 @@ Configuration fields:
 | `models.<alias>.bedrock_model_id` | yes | Bedrock model ID or inference-profile ID. |
 | `models.<alias>.input_per_million` | no | Input price in dollars per million tokens, used only for estimated logs. `0` is valid. |
 | `models.<alias>.output_per_million` | no | Output price in dollars per million tokens, used only for estimated logs. `0` is valid. |
-| `models.<alias>.cache_read_input_per_million` | no | Prompt-cache read price in dollars per million tokens. Required for an estimate when a response reports a nonzero cache-read count. |
-| `models.<alias>.cache_write_input_per_million` | no | Prompt-cache write price in dollars per million tokens. Required for an estimate when a response reports a nonzero cache-write count. |
+| `models.<alias>.cache_read_input_per_million` | no | Prompt-cache read price in dollars per million tokens. Explicit values override documented rates derived for exact Astra, Sol, Terra, and Luna Bedrock Runtime targets. Other targets require this field when cache reads are nonzero. |
+| `models.<alias>.cache_write_input_per_million` | no | Prompt-cache write price in dollars per million tokens. Explicit values override documented rates derived for exact Astra, Sol, Terra, and Luna Bedrock Runtime targets. Other targets require this field when cache writes are nonzero. |
 | `models.<alias>.temperature` | no | Default temperature inserted only when the request omits it. |
 | `models.<alias>.max_tokens` | no | Default output-token limit inserted only when the request omits it. |
 | `models.<alias>.capabilities.metadata_profile` | generated client metadata | Exact bundled metadata profile. Profiles are matched only by name or exact Bedrock target ID. |
@@ -151,7 +151,7 @@ Configuration fields:
 | `models.<alias>.capabilities.reasoning` | generated client metadata | Whether adjustable reasoning is supported and the exact supported efforts. |
 | `models.<alias>.capabilities.tools` | generated client metadata | Client-side function-calling and parallel-call support. |
 
-Prices are never fetched automatically. If the upstream response does not contain both token counts, either base price is omitted, or a reported nonzero cache dimension has no configured price, the request estimate is unavailable rather than zero. Keep model aliases free of surrounding whitespace and use finite, nonnegative prices.
+Prices are never fetched automatically. For the exact Bedrock Runtime inference IDs of GPT-6 Astra and GPT-5.6 Sol, Terra, and Luna, the proxy derives the [AWS-documented 30-minute cache prices](https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html) from `input_per_million`: cache reads use `0.1x` and cache writes use `1.25x`. Explicit cache prices override those derived values. Unknown targets still require explicit cache prices. If the upstream response does not contain both token counts, either base price is omitted, or a reported nonzero cache dimension has no resolved price, the request estimate is unavailable rather than zero. Keep model aliases free of surrounding whitespace and use finite, nonnegative prices.
 
 The proxy calculates cost while it records each request. For Responses and Chat Completions, the reported input total includes cache-read and cache-write tokens, so the proxy subtracts those subsets before applying the normal input rate and then prices each cache subset separately. Anthropic Messages reports uncached input, cache reads, and cache writes as separate counts, so all three are priced directly. Output reasoning tokens remain part of the output total.
 
