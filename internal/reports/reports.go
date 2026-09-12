@@ -3,11 +3,8 @@ package reports
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"html/template"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -60,6 +57,8 @@ type Metrics struct {
 	UnsupportedFeatureRejections int     `json:"unsupported_feature_rejections"`
 	AverageContextUtilization    float64 `json:"average_context_utilization"`
 	AverageOutputUtilization     float64 `json:"average_output_utilization"`
+	ContextUtilizationSamples    int     `json:"context_utilization_samples"`
+	OutputUtilizationSamples     int     `json:"output_utilization_samples"`
 }
 
 type Point struct {
@@ -227,6 +226,8 @@ func Generate(options Options) (Report, error) {
 	if outputSamples > 0 {
 		report.Metrics.AverageOutputUtilization = outputTotal / float64(outputSamples)
 	}
+	report.Metrics.ContextUtilizationSamples = contextSamples
+	report.Metrics.OutputUtilizationSamples = outputSamples
 	return report, nil
 }
 
@@ -419,80 +420,3 @@ func label(value, fallback string) string {
 	}
 	return value
 }
-
-type htmlView struct {
-	Report      Report
-	SuccessRate string
-	RequestBars []bar
-	CostBars    []bar
-}
-
-type bar struct {
-	Label  string
-	Value  string
-	Height int
-}
-
-// HTML renders a standalone report with inline CSS and SVG charts.
-func HTML(report Report) ([]byte, error) {
-	view := htmlView{Report: report, RequestBars: makeBars(report.Series, func(point Point) float64 { return float64(point.Requests) }, func(point Point) string { return fmt.Sprintf("%d requests", point.Requests) }), CostBars: makeBars(report.Series, func(point Point) float64 { return point.KnownEstimatedCost }, func(point Point) string {
-		return costDisplay(point.KnownEstimatedCost, point.MissingCostRequests, point.Requests, 4)
-	})}
-	if report.Metrics.Requests > 0 {
-		view.SuccessRate = fmt.Sprintf("%.1f%%", float64(report.Metrics.Successes)*100/float64(report.Metrics.Requests))
-	} else {
-		view.SuccessRate = "n/a"
-	}
-	var output bytes.Buffer
-	if err := htmlTemplate.Execute(&output, view); err != nil {
-		return nil, err
-	}
-	return output.Bytes(), nil
-}
-
-func makeBars(points []Point, number func(Point) float64, text func(Point) string) []bar {
-	max := 0.0
-	for _, point := range points {
-		max = math.Max(max, number(point))
-	}
-	result := make([]bar, 0, len(points))
-	for _, point := range points {
-		height := 0
-		if max > 0 {
-			height = int(math.Round(number(point) / max * 160))
-		}
-		result = append(result, bar{Label: point.Start, Value: text(point), Height: height})
-	}
-	return result
-}
-
-func costDisplay(known float64, missing, requests, precision int) string {
-	if requests == 0 {
-		return "n/a"
-	}
-	if missing >= requests {
-		return "unavailable"
-	}
-	value := fmt.Sprintf("$%.*f", precision, known)
-	if missing > 0 {
-		return value + " partial"
-	}
-	return value
-}
-
-var htmlTemplate = template.Must(template.New("report").Funcs(template.FuncMap{
-	"summaryCost": func(metrics Metrics) string {
-		return costDisplay(metrics.KnownEstimatedCost, metrics.MissingCostRequests, metrics.Requests, 4)
-	},
-	"rowCost": func(value Breakdown) string {
-		return costDisplay(value.KnownEstimatedCost, value.MissingCostRequests, value.Requests, 6)
-	},
-}).Parse(`<!doctype html>
-<html><head><meta charset="utf-8"><title>Bedrock Local Proxy report</title><style>
-body{font:15px system-ui,sans-serif;max-width:1120px;margin:32px auto;padding:0 20px;color:#18212f;background:#f7f8fa}h1,h2{color:#101827}.sub{color:#526070}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}.card,section{background:white;border:1px solid #dce1e8;border-radius:10px;padding:16px;margin:16px 0}.card b{font-size:24px;display:block}.charts{display:grid;grid-template-columns:1fr 1fr;gap:16px}.chart{height:220px;display:flex;align-items:end;gap:3px;border-bottom:1px solid #bac4d1;padding:0 4px}.bar{min-width:8px;flex:1;background:#3973b9;border-radius:3px 3px 0 0}.cost .bar{background:#17875b}table{border-collapse:collapse;width:100%;margin-top:8px}th,td{padding:8px;text-align:left;border-bottom:1px solid #e5e8ed}th{color:#526070;font-weight:600}@media(max-width:700px){.charts{grid-template-columns:1fr}}</style></head><body>
-<h1>Bedrock Local Proxy usage report</h1><p class="sub">{{.Report.Start}} to {{.Report.Stop}} UTC · generated {{.Report.GeneratedAt}}</p>
-<div class="cards"><div class="card"><span>Requests</span><b>{{.Report.Metrics.Requests}}</b></div><div class="card"><span>Success rate</span><b>{{.SuccessRate}}</b></div><div class="card"><span>Estimated cost</span><b>{{summaryCost .Report.Metrics}}</b></div><div class="card"><span>Tokens</span><b>{{.Report.Metrics.KnownInputTokens}} / {{.Report.Metrics.KnownOutputTokens}}</b><span>input / output</span><br><span>{{.Report.Metrics.KnownCacheReadInputTokens}} / {{.Report.Metrics.KnownCacheWriteInputTokens}} cache read / write</span></div><div class="card"><span>Function calls</span><b>{{.Report.Metrics.FunctionToolCalls}}</b></div><div class="card"><span>Unsupported features</span><b>{{.Report.Metrics.UnsupportedFeatureRejections}}</b></div><div class="card"><span>Sessions</span><b>{{.Report.Sessions}}</b></div></div>
-<section><h2>Coverage</h2><p>{{.Report.Metrics.Successes}} successful · {{.Report.Metrics.Failures}} failed ({{.Report.Metrics.Canceled}} canceled) · {{.Report.Metrics.MissingUsageRequests}} requests without complete usage · {{.Report.Metrics.MissingCostRequests}} requests without an estimate · {{.Report.Metrics.ModelListEvents}} model-list events excluded from totals · {{.Report.SkippedSessions}} unreadable or unrecognized session directories skipped.</p></section>
-<div class="charts"><section><h2>Requests over time</h2><div class="chart">{{range .RequestBars}}<div class="bar" style="height:{{.Height}}px" title="{{.Label}}: {{.Value}}"></div>{{end}}</div></section><section><h2>Estimated cost over time</h2><div class="chart cost">{{range .CostBars}}<div class="bar" style="height:{{.Height}}px" title="{{.Label}}: {{.Value}}"></div>{{end}}</div></section></div>
-{{template "breakdown" .Report.Models}}<section><h2>Endpoint breakdown</h2>{{template "rows" .Report.Endpoints}}</section><section><h2>Session tag breakdown</h2>{{template "rows" .Report.SessionTags}}</section><section><h2>Client compatibility breakdown</h2>{{template "rows" .Report.Clients}}</section><section><h2>Metadata profile breakdown</h2>{{template "rows" .Report.MetadataProfiles}}</section><section><h2>Catalog breakdown</h2>{{template "rows" .Report.Catalogs}}</section><section><h2>Claude settings breakdown</h2>{{template "rows" .Report.ClaudeSettings}}</section>
-</body></html>{{define "breakdown"}}<section><h2>Model breakdown</h2>{{template "rows" .}}</section>{{end}}{{define "rows"}}<table><thead><tr><th>Name</th><th>Requests</th><th>Successes</th><th>Failures</th><th>Input tokens</th><th>Output tokens</th><th>Cache read</th><th>Cache write</th><th>Estimated cost</th></tr></thead><tbody>{{range .}}<tr><td>{{.Name}}</td><td>{{.Requests}}</td><td>{{.Successes}}</td><td>{{.Failures}}</td><td>{{.KnownInputTokens}}</td><td>{{.KnownOutputTokens}}</td><td>{{.KnownCacheReadInputTokens}}</td><td>{{.KnownCacheWriteInputTokens}}</td><td>{{rowCost .}}</td></tr>{{else}}<tr><td colspan="9">No generation requests in this period.</td></tr>{{end}}</tbody></table>{{end}}`))

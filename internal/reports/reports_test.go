@@ -42,7 +42,7 @@ func TestGenerateAggregatesOnlyTheRequestedWindow(t *testing.T) {
 	if metrics.KnownCacheReadInputTokens != 4 || metrics.KnownCacheWriteInputTokens != 5 {
 		t.Fatalf("cache token metrics = %+v", metrics)
 	}
-	if metrics.FunctionToolCalls != 2 || metrics.UnsupportedFeatureRejections != 1 || metrics.AverageContextUtilization != 0.1 || metrics.AverageOutputUtilization != 0.2 {
+	if metrics.FunctionToolCalls != 2 || metrics.UnsupportedFeatureRejections != 1 || metrics.AverageContextUtilization != 0.1 || metrics.AverageOutputUtilization != 0.2 || metrics.ContextUtilizationSamples != 1 || metrics.OutputUtilizationSamples != 1 {
 		t.Fatalf("compatibility metrics = %+v", metrics)
 	}
 	if len(report.Series) != 2 || len(report.Models) != 2 || len(report.Endpoints) != 3 || len(report.SessionTags) != 2 || len(report.Clients) != 3 || len(report.MetadataProfiles) != 2 || len(report.Catalogs) != 2 || len(report.ClaudeSettings) != 2 {
@@ -52,7 +52,7 @@ func TestGenerateAggregatesOnlyTheRequestedWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, text := range []string{"usage report", "Requests over time", "Estimated cost over time", "Model breakdown", "Client compatibility breakdown", "Metadata profile breakdown", "Catalog breakdown", "Claude settings breakdown", "claude-settings", "nightly", "$0.0500 partial", "4 / 5 cache read / write"} {
+	for _, text := range []string{"Usage report", "Request activity", "Estimated spend", "Cost and usage by model", "Cost and usage by session tag", "Endpoints", "Clients", "Compatibility details", "Metadata profiles", "Codex catalogs", "Claude settings", "claude-settings", "nightly", "$0.050 partial", "4 / 5", "10.0% / 20.0%"} {
 		if !strings.Contains(string(html), text) {
 			t.Fatalf("HTML does not contain %q", text)
 		}
@@ -68,8 +68,21 @@ func TestHTMLShowsUnavailableInsteadOfZeroWhenNoCostsAreKnown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(html), "unavailable") || strings.Contains(string(html), "$0.0000") || strings.Contains(string(html), "$0.000000") {
+	if !strings.Contains(string(html), "unavailable") || !strings.Contains(string(html), "Cost coverage is incomplete") || strings.Contains(string(html), "$0.0000") || strings.Contains(string(html), "$0.000000") {
 		t.Fatalf("missing estimates rendered as zero: %s", html)
+	}
+}
+
+func TestHTMLExplainsAnEmptyPeriod(t *testing.T) {
+	report := Report{Start: "2026-09-01T00:00:00Z", Stop: "2026-09-02T00:00:00Z", GeneratedAt: "2026-09-02T00:00:01Z", ReportDirectory: "/private/reports"}
+	html, err := HTML(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"No generation requests", "No request activity in this period", "No estimated spend in this period", "n/a cost coverage"} {
+		if !strings.Contains(string(html), text) {
+			t.Fatalf("empty dashboard does not contain %q: %s", text, html)
+		}
 	}
 }
 
