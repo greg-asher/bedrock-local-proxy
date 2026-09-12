@@ -56,6 +56,9 @@ type costBar struct {
 
 // HTML renders a private, standalone dashboard with no external assets.
 func HTML(report Report) ([]byte, error) {
+	if strings.TrimSpace(report.PricingSource) == "" {
+		report.PricingSource = "stored session estimates"
+	}
 	metrics := report.Metrics
 	knownCosts := metrics.Requests - metrics.MissingCostRequests
 	view := htmlView{
@@ -96,7 +99,7 @@ func buildNotices(report Report) []htmlNotice {
 		return []htmlNotice{{Tone: "info", Title: "No generation requests", Text: "No generation events were recorded inside this time window."}}
 	}
 	if metrics.MissingCostRequests > 0 {
-		result = append(result, htmlNotice{Tone: "warning", Title: "Cost coverage is incomplete", Text: fmt.Sprintf("%s of %s have no estimate. Check token usage and all applicable input, output, cache-read, and cache-write prices.", plural(metrics.MissingCostRequests, "request", "requests"), plural(metrics.Requests, "request", "requests"))})
+		result = append(result, htmlNotice{Tone: "warning", Title: "Cost coverage is incomplete", Text: fmt.Sprintf("%s of %s have no estimate. The pricing diagnostics below identify the model and exact missing value.", plural(metrics.MissingCostRequests, "request", "requests"), plural(metrics.Requests, "request", "requests"))})
 	}
 	if metrics.MissingUsageRequests > 0 {
 		result = append(result, htmlNotice{Tone: "warning", Title: "Usage coverage is incomplete", Text: fmt.Sprintf("%s did not include complete input and output token counts.", plural(metrics.MissingUsageRequests, "request", "requests"))})
@@ -303,16 +306,17 @@ var dashboardTemplate = template.Must(template.New("report").Funcs(template.Func
 </style></head><body><main class="shell">
 <header><div class="eyebrow">Bedrock Local Proxy</div><h1>Usage report</h1><div class="period">{{.PeriodStart}} → {{.PeriodStop}}</div></header>
 <section class="summary" aria-label="Report summary">
-<div class="metric"><span class="label">Estimated cost</span><strong>{{.CostSummary}}</strong><small>{{.CostCoverage}} cost coverage</small></div>
+<div class="metric"><span class="label">Estimated cost</span><strong>{{.CostSummary}}</strong><small>{{.CostCoverage}} cost coverage · {{.Report.PricingSource}}</small></div>
 <div class="metric"><span class="label">Generation requests</span><strong>{{requests .Report.Metrics.Requests}}</strong><small>{{.SuccessRate}} successful · {{.SessionsSummary}}</small></div>
 <div class="metric"><span class="label">Reported tokens</span><strong>{{tokens .Report.Metrics.KnownInputTokens}} / {{tokens .Report.Metrics.KnownOutputTokens}}</strong><small>input / output · {{.UsageCoverage}} usage coverage</small></div>
 <div class="metric"><span class="label">Prompt cache</span><strong>{{tokens .Report.Metrics.KnownCacheReadInputTokens}} / {{tokens .Report.Metrics.KnownCacheWriteInputTokens}}</strong><small>read / write tokens</small></div>
-<div class="metric"><span class="label">Average known cost</span><strong>{{.AverageKnownCost}}</strong><small>per request with an estimate</small></div>
+<div class="metric"><span class="label">Average known cost</span><strong>{{.AverageKnownCost}}</strong><small>{{requests .Report.Metrics.RepricedCostRequests}} repriced · {{requests .Report.Metrics.StoredCostRequests}} stored</small></div>
 <div class="metric"><span class="label">Average utilization</span><strong>{{.ContextUsage}} / {{.OutputUsage}}</strong><small>context / output ceiling</small></div>
 <div class="metric"><span class="label">Function calls</span><strong>{{requests .Report.Metrics.FunctionToolCalls}}</strong><small>{{requests .Report.Metrics.UnsupportedFeatureRejections}} unsupported feature rejections</small></div>
 <div class="metric"><span class="label">Other activity</span><strong>{{requests .Report.Metrics.ModelListEvents}}</strong><small>model-list events excluded from totals</small></div>
 </section>
 <section class="notices" aria-label="Report findings">{{range .Notices}}<div class="notice {{.Tone}}"><div><b>{{.Title}}</b><p>{{.Text}}</p></div></div>{{end}}</section>
+{{if .Report.PricingIssues}}<section class="section"><div class="panel-head"><div><h2>Pricing diagnostics</h2><p>Repricing gaps and stored-estimate fallbacks</p></div></div><div class="table-wrap"><table><thead><tr><th>Model</th><th>Requests</th><th>Issue</th></tr></thead><tbody>{{range .Report.PricingIssues}}<tr><td class="primary">{{.Model}}</td><td>{{requests .Requests}}</td><td style="text-align:left">{{.Reason}}</td></tr>{{end}}</tbody></table></div></section>{{end}}
 <section class="grid" aria-label="Trends">
 <div class="panel"><div class="panel-head"><div><h2>Request activity</h2><p>Successful and failed generations by time bucket</p></div><span class="pill">{{requests .Report.Metrics.Requests}} total</span></div>{{if .HasRequests}}<div class="plot"><div class="y-axis"><span>{{.RequestScale}}</span><span>0</span></div><div class="columns">{{range .RequestBars}}<div class="column" title="{{.Label}} · {{.Value}}"><div class="segment success" style="height:{{.SuccessHeight}}px"></div><div class="segment failure" style="height:{{.FailureHeight}}px"></div></div>{{end}}</div></div><div class="x-axis"><span>{{.FirstBucket}}</span><span>UTC</span><span>{{.LastBucket}}</span></div><div class="legend"><span class="key">Successful</span><span class="key failure">Failed or canceled</span></div>{{else}}<div class="empty">No request activity in this period</div>{{end}}</div>
 <div class="panel"><div class="panel-head"><div><h2>Estimated spend</h2><p>Recorded estimates by time bucket</p></div><span class="pill green">{{.CostSummary}}</span></div>{{if .HasRequests}}<div class="plot"><div class="y-axis"><span>{{.CostScale}}</span><span>$0</span></div><div class="columns">{{range .CostBars}}<div class="column" title="{{.Label}} · {{.Value}}"><div class="segment cost {{.Class}}" style="height:{{.Height}}px"></div></div>{{end}}</div></div><div class="x-axis"><span>{{.FirstBucket}}</span><span>UTC</span><span>{{.LastBucket}}</span></div><div class="legend"><span class="key cost">Complete</span><span class="key partial">Partial coverage</span><span class="key failure">Unavailable</span></div>{{else}}<div class="empty">No estimated spend in this period</div>{{end}}</div>
@@ -321,7 +325,7 @@ var dashboardTemplate = template.Must(template.New("report").Funcs(template.Func
 <section class="section"><div class="panel-head"><div><h2>Cost and usage by session tag</h2><p>Use tags to attribute runs to a project, workflow, or test</p></div></div>{{template "usage-table" (dict .Report.SessionTags .Report.Metrics.KnownEstimatedCost)}}</section>
 <section class="grid"><div class="panel compact"><div class="panel-head"><div><h2>Endpoints</h2><p>Protocol traffic and outcomes</p></div></div>{{template "compact-table" .Report.Endpoints}}</div><div class="panel compact"><div class="panel-head"><div><h2>Clients</h2><p>Observed client family and version</p></div></div>{{template "compact-table" .Report.Clients}}</div></section>
 {{if .HasCompatibility}}<details class="panel diagnostics"><summary>Compatibility details</summary><div class="diagnostic-grid"><div><h2>Metadata profiles</h2>{{template "diagnostic-table" .Report.MetadataProfiles}}</div><div><h2>Codex catalogs</h2>{{template "id-table" .Report.Catalogs}}</div><div><h2>Claude settings</h2>{{template "id-table" .Report.ClaudeSettings}}</div></div></details>{{end}}
-<footer>Generated {{.GeneratedAt}} from <code>{{.Report.ReportDirectory}}</code>. Costs are estimates stored when each request completed. This report does not reprice historical events.</footer>
+<footer>Generated {{.GeneratedAt}} from <code>{{.Report.ReportDirectory}}</code>. Cost source: {{.Report.PricingSource}}. Prices are user supplied and remain estimates.</footer>
 </main></body></html>
 {{define "usage-table"}}{{$rows := index . 0}}{{$total := index . 1}}<div class="table-wrap"><table><thead><tr><th>Name</th><th>Requests</th><th>Success</th><th>Reported input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th>Cost coverage</th><th>Estimated cost</th><th>Known cost share</th><th>Avg / priced request</th></tr></thead><tbody>{{range $rows}}<tr><td class="primary">{{.Name}}</td><td>{{requests .Requests}}</td><td>{{rowSuccess .}}</td><td>{{tokens .KnownInputTokens}}</td><td>{{tokens .KnownOutputTokens}}</td><td>{{tokens .KnownCacheReadInputTokens}}</td><td>{{tokens .KnownCacheWriteInputTokens}}</td><td>{{rowCoverage .}}</td><td>{{rowCost .}}</td><td>{{rowShare . $total}}</td><td>{{rowAverage .}}</td></tr>{{else}}<tr><td colspan="11" class="muted">No generation requests in this period.</td></tr>{{end}}</tbody></table></div>{{end}}
 {{define "compact-table"}}<div class="table-wrap"><table><thead><tr><th>Name</th><th>Requests</th><th>Success</th><th>Estimated cost</th><th>Cost coverage</th></tr></thead><tbody>{{range .}}<tr><td class="primary">{{.Name}}</td><td>{{requests .Requests}}</td><td>{{rowSuccess .}}</td><td>{{rowCost .}}</td><td>{{rowCoverage .}}</td></tr>{{else}}<tr><td colspan="5" class="muted">No data.</td></tr>{{end}}</tbody></table></div>{{end}}

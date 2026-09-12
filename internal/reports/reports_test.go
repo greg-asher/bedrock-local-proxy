@@ -2,11 +2,14 @@ package reports
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gregasher/bedrock-local-proxy/internal/config"
 )
 
 func TestGenerateAggregatesOnlyTheRequestedWindow(t *testing.T) {
@@ -36,8 +39,11 @@ func TestGenerateAggregatesOnlyTheRequestedWindow(t *testing.T) {
 	if metrics.Requests != 3 || metrics.Successes != 1 || metrics.Failures != 2 || metrics.Canceled != 1 || metrics.ModelListEvents != 1 {
 		t.Fatalf("metrics = %+v", metrics)
 	}
-	if metrics.KnownInputTokens != 11 || metrics.KnownOutputTokens != 22 || metrics.KnownEstimatedCost != 0.05 || metrics.MissingUsageRequests != 1 || metrics.MissingCostRequests != 1 {
+	if metrics.KnownInputTokens != 11 || metrics.KnownOutputTokens != 22 || metrics.KnownEstimatedCost != 0.05 || metrics.MissingUsageRequests != 1 || metrics.MissingCostRequests != 1 || metrics.StoredCostRequests != 2 || metrics.RepricedCostRequests != 0 {
 		t.Fatalf("cost and token metrics = %+v", metrics)
+	}
+	if report.PricingSource != "stored session estimates" {
+		t.Fatalf("pricing source = %q", report.PricingSource)
 	}
 	if metrics.KnownCacheReadInputTokens != 4 || metrics.KnownCacheWriteInputTokens != 5 {
 		t.Fatalf("cache token metrics = %+v", metrics)
@@ -82,6 +88,47 @@ func TestHTMLExplainsAnEmptyPeriod(t *testing.T) {
 	for _, text := range []string{"No generation requests", "No request activity in this period", "No estimated spend in this period", "n/a cost coverage"} {
 		if !strings.Contains(string(html), text) {
 			t.Fatalf("empty dashboard does not contain %q: %s", text, html)
+		}
+	}
+}
+
+func TestGenerateRepricesRecordedUsageFromCurrentModels(t *testing.T) {
+	parent := t.TempDir()
+	start := time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC)
+	stale := 9.0
+	writeSession(t, parent, "session-pricing", []event{
+		{Event: "request", Timestamp: start.Add(time.Hour).Format(time.RFC3339Nano), Endpoint: "/v1/responses", LocalModel: "coding", Outcome: "success", InputTokens: int64ptr(1000), OutputTokens: int64ptr(100), CacheReadInputTokens: int64ptr(400), CacheWriteInputTokens: int64ptr(100), EstimatedCost: &stale, UsageStatus: "known"},
+		{Event: "request", Timestamp: start.Add(2 * time.Hour).Format(time.RFC3339Nano), Endpoint: "/v1/messages", LocalModel: "claude", Outcome: "success", InputTokens: int64ptr(1000), OutputTokens: int64ptr(100), CacheReadInputTokens: int64ptr(400), CacheWriteInputTokens: int64ptr(100), UsageStatus: "known"},
+		{Event: "request", Timestamp: start.Add(3 * time.Hour).Format(time.RFC3339Nano), Endpoint: "/v1/responses", LocalModel: "legacy", Outcome: "success", InputTokens: int64ptr(10), OutputTokens: int64ptr(2), EstimatedCost: float64ptr(0.5), UsageStatus: "known"},
+		{Event: "request", Timestamp: start.Add(4 * time.Hour).Format(time.RFC3339Nano), Endpoint: "/v1/responses", LocalModel: "unpriced", Outcome: "success", InputTokens: int64ptr(10), OutputTokens: int64ptr(2), EstimatedCost: &stale, UsageStatus: "known"},
+		{Event: "request", Timestamp: start.Add(5 * time.Hour).Format(time.RFC3339Nano), Endpoint: "/v1/responses", LocalModel: "retargeted", UpstreamModel: "old-target", Outcome: "success", InputTokens: int64ptr(10), OutputTokens: int64ptr(2), EstimatedCost: float64ptr(0.25), UsageStatus: "known"},
+	})
+	inputPrice, outputPrice := 2.0, 10.0
+	cacheReadPrice, cacheWritePrice := 0.2, 2.5
+	models := map[string]config.ModelConfig{
+		"coding":     {InputPerMillion: &inputPrice, OutputPerMillion: &outputPrice, CacheReadInputPerMillion: &cacheReadPrice, CacheWriteInputPerMillion: &cacheWritePrice},
+		"claude":     {InputPerMillion: &inputPrice, OutputPerMillion: &outputPrice, CacheReadInputPerMillion: &cacheReadPrice, CacheWriteInputPerMillion: &cacheWritePrice},
+		"unpriced":   {InputPerMillion: &inputPrice},
+		"retargeted": {BedrockModelID: "new-target", InputPerMillion: &inputPrice, OutputPerMillion: &outputPrice},
+	}
+
+	report, err := Generate(Options{Directory: parent, Start: start, Stop: start.Add(24 * time.Hour), Models: models, Reprice: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(report.Metrics.KnownEstimatedCost-0.75566) > 1e-12 || report.Metrics.RepricedCostRequests != 2 || report.Metrics.StoredCostRequests != 2 || report.Metrics.MissingCostRequests != 1 {
+		t.Fatalf("repriced metrics = %+v", report.Metrics)
+	}
+	if report.PricingSource != "current model configuration with stored fallbacks" || len(report.PricingIssues) != 3 {
+		t.Fatalf("pricing source/issues = %q %+v", report.PricingSource, report.PricingIssues)
+	}
+	html, err := HTML(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"Pricing diagnostics", "output_per_million is missing", "stored estimate retained", "different Bedrock model", "2 repriced · 2 stored"} {
+		if !strings.Contains(string(html), text) {
+			t.Fatalf("repriced dashboard does not contain %q", text)
 		}
 	}
 }

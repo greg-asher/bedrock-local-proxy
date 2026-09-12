@@ -10,6 +10,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/gregasher/bedrock-local-proxy/internal/config"
+	"github.com/gregasher/bedrock-local-proxy/internal/pricing"
 )
 
 const schemaVersion = 1
@@ -19,25 +22,29 @@ type Options struct {
 	Directory string
 	Start     time.Time
 	Stop      time.Time
+	Models    map[string]config.ModelConfig
+	Reprice   bool
 }
 
 // Report is the portable, metadata-only summary for a selected period.
 type Report struct {
-	GeneratedAt      string      `json:"generated_at"`
-	ReportDirectory  string      `json:"report_directory"`
-	Start            string      `json:"start"`
-	Stop             string      `json:"stop"`
-	Sessions         int         `json:"sessions"`
-	SkippedSessions  int         `json:"skipped_sessions"`
-	Metrics          Metrics     `json:"metrics"`
-	Series           []Point     `json:"series"`
-	Models           []Breakdown `json:"models"`
-	Endpoints        []Breakdown `json:"endpoints"`
-	SessionTags      []Breakdown `json:"session_tags"`
-	Clients          []Breakdown `json:"clients"`
-	MetadataProfiles []Breakdown `json:"metadata_profiles"`
-	Catalogs         []Breakdown `json:"catalogs"`
-	ClaudeSettings   []Breakdown `json:"claude_settings"`
+	GeneratedAt      string         `json:"generated_at"`
+	ReportDirectory  string         `json:"report_directory"`
+	Start            string         `json:"start"`
+	Stop             string         `json:"stop"`
+	Sessions         int            `json:"sessions"`
+	SkippedSessions  int            `json:"skipped_sessions"`
+	Metrics          Metrics        `json:"metrics"`
+	Series           []Point        `json:"series"`
+	Models           []Breakdown    `json:"models"`
+	Endpoints        []Breakdown    `json:"endpoints"`
+	SessionTags      []Breakdown    `json:"session_tags"`
+	Clients          []Breakdown    `json:"clients"`
+	MetadataProfiles []Breakdown    `json:"metadata_profiles"`
+	Catalogs         []Breakdown    `json:"catalogs"`
+	ClaudeSettings   []Breakdown    `json:"claude_settings"`
+	PricingSource    string         `json:"pricing_source"`
+	PricingIssues    []PricingIssue `json:"pricing_issues"`
 }
 
 type Metrics struct {
@@ -59,6 +66,8 @@ type Metrics struct {
 	AverageOutputUtilization     float64 `json:"average_output_utilization"`
 	ContextUtilizationSamples    int     `json:"context_utilization_samples"`
 	OutputUtilizationSamples     int     `json:"output_utilization_samples"`
+	RepricedCostRequests         int     `json:"repriced_cost_requests"`
+	StoredCostRequests           int     `json:"stored_cost_requests"`
 }
 
 type Point struct {
@@ -89,6 +98,14 @@ type Breakdown struct {
 	UnsupportedFeatureRejections int     `json:"unsupported_feature_rejections"`
 }
 
+// PricingIssue counts records that could not be repriced from the selected
+// configuration and explains the exact missing input.
+type PricingIssue struct {
+	Model    string `json:"model"`
+	Reason   string `json:"reason"`
+	Requests int    `json:"requests"`
+}
+
 type manifest struct {
 	SchemaVersion int    `json:"schema_version"`
 	SessionID     string `json:"session_id"`
@@ -96,29 +113,33 @@ type manifest struct {
 }
 
 type event struct {
-	Event                        string   `json:"event"`
-	Timestamp                    string   `json:"timestamp"`
-	SessionTag                   string   `json:"session_tag"`
-	Endpoint                     string   `json:"endpoint"`
-	LocalModel                   string   `json:"local_model"`
-	Outcome                      string   `json:"outcome"`
-	InputTokens                  *int64   `json:"input_tokens"`
-	OutputTokens                 *int64   `json:"output_tokens"`
-	CacheReadInputTokens         *int64   `json:"cache_read_input_tokens"`
-	CacheWriteInputTokens        *int64   `json:"cache_write_input_tokens"`
-	EstimatedCost                *float64 `json:"estimated_cost"`
-	UsageStatus                  string   `json:"usage_status"`
-	CostStatus                   string   `json:"cost_status"`
-	ClientFamily                 string   `json:"client_family"`
-	ClientVersion                string   `json:"client_version"`
-	MetadataProfile              string   `json:"metadata_profile"`
-	MetadataRevision             string   `json:"metadata_revision"`
-	CatalogHash                  string   `json:"catalog_hash"`
-	SettingsHash                 string   `json:"settings_hash"`
-	ContextUtilization           *float64 `json:"context_utilization"`
-	OutputUtilization            *float64 `json:"output_utilization"`
-	FunctionToolCalls            int      `json:"function_tool_calls"`
-	UnsupportedFeatureRejections int      `json:"unsupported_feature_rejections"`
+	Event                          string   `json:"event"`
+	Timestamp                      string   `json:"timestamp"`
+	SessionTag                     string   `json:"session_tag"`
+	Endpoint                       string   `json:"endpoint"`
+	LocalModel                     string   `json:"local_model"`
+	UpstreamModel                  string   `json:"upstream_model"`
+	Outcome                        string   `json:"outcome"`
+	InputTokens                    *int64   `json:"input_tokens"`
+	OutputTokens                   *int64   `json:"output_tokens"`
+	CacheReadInputTokens           *int64   `json:"cache_read_input_tokens"`
+	CacheWriteInputTokens          *int64   `json:"cache_write_input_tokens"`
+	InputTokensIncludeCache        bool     `json:"input_tokens_include_cache"`
+	EstimatedCost                  *float64 `json:"estimated_cost"`
+	UsageStatus                    string   `json:"usage_status"`
+	CostStatus                     string   `json:"cost_status"`
+	ClientFamily                   string   `json:"client_family"`
+	ClientVersion                  string   `json:"client_version"`
+	MetadataProfile                string   `json:"metadata_profile"`
+	MetadataRevision               string   `json:"metadata_revision"`
+	CatalogHash                    string   `json:"catalog_hash"`
+	SettingsHash                   string   `json:"settings_hash"`
+	ContextUtilization             *float64 `json:"context_utilization"`
+	OutputUtilization              *float64 `json:"output_utilization"`
+	FunctionToolCalls              int      `json:"function_tool_calls"`
+	UnsupportedFeatureRejections   int      `json:"unsupported_feature_rejections"`
+	ObservedUncoveredBillingFields bool     `json:"observed_uncovered_billing_fields"`
+	costSource                     string
 }
 
 // Generate reads recognized report directories and aggregates request events
@@ -134,7 +155,10 @@ func Generate(options Options) (Report, error) {
 	if err != nil {
 		return Report{}, fmt.Errorf("resolve report directory: %w", err)
 	}
-	report := Report{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), ReportDirectory: directory, Start: options.Start.UTC().Format(time.RFC3339Nano), Stop: options.Stop.UTC().Format(time.RFC3339Nano)}
+	report := Report{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), ReportDirectory: directory, Start: options.Start.UTC().Format(time.RFC3339Nano), Stop: options.Stop.UTC().Format(time.RFC3339Nano), PricingSource: "stored session estimates"}
+	if options.Reprice {
+		report.PricingSource = "current model configuration"
+	}
 	entries, err := os.ReadDir(directory)
 	if os.IsNotExist(err) {
 		return report, nil
@@ -153,6 +177,7 @@ func Generate(options Options) (Report, error) {
 	var contextTotal, outputTotal float64
 	var contextSamples, outputSamples int
 	contributingSessions := map[string]struct{}{}
+	pricingIssues := map[string]*PricingIssue{}
 	bucketDuration := 24 * time.Hour
 	if options.Stop.Sub(options.Start) <= 48*time.Hour {
 		bucketDuration = time.Hour
@@ -185,6 +210,15 @@ func Generate(options Options) (Report, error) {
 			if strings.HasPrefix(item.Endpoint, "/v1/models") {
 				report.Metrics.ModelListEvents++
 				continue
+			}
+			if reason := applyPricing(&item, options); reason != "" {
+				key := item.LocalModel + "\x00" + reason
+				issue := pricingIssues[key]
+				if issue == nil {
+					issue = &PricingIssue{Model: label(item.LocalModel, "unresolved model"), Reason: reason}
+					pricingIssues[key] = issue
+				}
+				issue.Requests++
 			}
 			applyMetrics(&report.Metrics, item)
 			bucket := at.UTC().Truncate(bucketDuration)
@@ -228,7 +262,70 @@ func Generate(options Options) (Report, error) {
 	}
 	report.Metrics.ContextUtilizationSamples = contextSamples
 	report.Metrics.OutputUtilizationSamples = outputSamples
+	report.PricingIssues = orderedPricingIssues(pricingIssues)
+	if options.Reprice && report.Metrics.StoredCostRequests > 0 {
+		report.PricingSource = "current model configuration with stored fallbacks"
+	}
 	return report, nil
+}
+
+func applyPricing(item *event, options Options) string {
+	if !options.Reprice {
+		if item.EstimatedCost != nil {
+			item.costSource = "stored"
+		}
+		return ""
+	}
+	model, ok := options.Models[item.LocalModel]
+	if !ok {
+		return retainStoredEstimate(item, "model alias is absent from the current configuration")
+	}
+	if item.UpstreamModel != "" && model.BedrockModelID != item.UpstreamModel {
+		return retainStoredEstimate(item, "model alias now targets a different Bedrock model")
+	}
+	item.EstimatedCost = nil
+	item.CostStatus = "unavailable"
+	includesCache := item.InputTokensIncludeCache || item.Endpoint == "/v1/responses" || item.Endpoint == "/v1/chat/completions"
+	cost, reason := pricing.Estimate(model, pricing.Usage{
+		InputTokens:                    item.InputTokens,
+		OutputTokens:                   item.OutputTokens,
+		CacheReadInputTokens:           item.CacheReadInputTokens,
+		CacheWriteInputTokens:          item.CacheWriteInputTokens,
+		InputTokensIncludeCache:        includesCache,
+		ObservedUncoveredBillingFields: item.ObservedUncoveredBillingFields,
+	})
+	if reason != "" {
+		return string(reason)
+	}
+	item.EstimatedCost = &cost
+	item.CostStatus = "estimated"
+	item.costSource = "repriced"
+	return ""
+}
+
+func retainStoredEstimate(item *event, reason string) string {
+	if item.EstimatedCost != nil {
+		item.costSource = "stored"
+		return reason + "; stored estimate retained"
+	}
+	return reason
+}
+
+func orderedPricingIssues(values map[string]*PricingIssue) []PricingIssue {
+	result := make([]PricingIssue, 0, len(values))
+	for _, value := range values {
+		result = append(result, *value)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Requests != result[j].Requests {
+			return result[i].Requests > result[j].Requests
+		}
+		if result[i].Model != result[j].Model {
+			return result[i].Model < result[j].Model
+		}
+		return result[i].Reason < result[j].Reason
+	})
+	return result
 }
 
 func readSession(path string) (bool, []event, error) {
@@ -303,6 +400,11 @@ func applyMetrics(metrics *Metrics, item event) {
 	}
 	if item.EstimatedCost != nil {
 		metrics.KnownEstimatedCost += *item.EstimatedCost
+		if item.costSource == "repriced" {
+			metrics.RepricedCostRequests++
+		} else if item.costSource == "stored" {
+			metrics.StoredCostRequests++
+		}
 	} else {
 		metrics.MissingCostRequests++
 	}

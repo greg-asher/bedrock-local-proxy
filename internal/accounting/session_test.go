@@ -109,7 +109,7 @@ func TestSessionReporterWritesPrivateSafeReport(t *testing.T) {
 		}
 	}
 	all := string(data)
-	if !strings.Contains(all, `"client_family":"codex"`) || !strings.Contains(all, `"catalog_hash":"`+strings.Repeat("a", 64)+`"`) || !strings.Contains(all, `"client_family":"claude-code"`) || !strings.Contains(all, `"settings_hash":"`+strings.Repeat("b", 64)+`"`) || !strings.Contains(all, `"function_tool_calls":1`) || !strings.Contains(all, `"cache_read_input_tokens":1`) || !strings.Contains(all, `"cache_write_input_tokens":1`) || !strings.Contains(all, `"estimated_cost":0.0000167`) {
+	if !strings.Contains(all, `"client_family":"codex"`) || !strings.Contains(all, `"catalog_hash":"`+strings.Repeat("a", 64)+`"`) || !strings.Contains(all, `"client_family":"claude-code"`) || !strings.Contains(all, `"settings_hash":"`+strings.Repeat("b", 64)+`"`) || !strings.Contains(all, `"function_tool_calls":1`) || !strings.Contains(all, `"cache_read_input_tokens":1`) || !strings.Contains(all, `"cache_write_input_tokens":1`) || !strings.Contains(all, `"input_tokens_include_cache":true`) || !strings.Contains(all, `"estimated_cost":0.0000167`) {
 		t.Fatalf("report omitted safe compatibility metadata: %s", all)
 	}
 	for _, sentinel := range []string{"prompt-secret", "completion-secret", "tool-secret", "credential-secret", "header-secret", "raw-upstream-error"} {

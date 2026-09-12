@@ -224,6 +224,7 @@ func TestRunRejectsDuplicateOrInvalidSessionTag(t *testing.T) {
 }
 
 func TestReportCommandWritesPeriodHTMLWithoutConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	parent := t.TempDir()
 	session := filepath.Join(parent, "session-a")
 	if err := os.Mkdir(session, 0o700); err != nil {
@@ -259,6 +260,51 @@ func TestReportCommandWritesPeriodHTMLWithoutConfig(t *testing.T) {
 	info, err := os.Stat(output)
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("report permissions=%v err=%v", info.Mode(), err)
+	}
+}
+
+func TestReportCommandRepricesUsageWithDefaultConfiguration(t *testing.T) {
+	parent := t.TempDir()
+	session := filepath.Join(parent, "session-a")
+	if err := os.Mkdir(session, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := json.Marshal(map[string]any{"schema_version": 1, "session_id": "session-a", "report_path": session})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(session, "session.json"), manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	events := `{"event":"request","timestamp":"2026-09-01T12:00:00Z","session_tag":"nightly","endpoint":"/v1/responses","local_model":"coding","outcome":"success","input_tokens":5,"output_tokens":8,"usage_status":"known","cost_status":"unavailable"}` + "\n"
+	if err := os.WriteFile(filepath.Join(session, "events.jsonl"), []byte(events), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".config", "bedrock-proxy", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configYAML := "version: 1\naws:\n  profile: test\n  region: us-east-1\nlisten: 127.0.0.1:8787\nmodels:\n  coding:\n    bedrock_model_id: target\n    input_per_million: 2\n    output_per_million: 3\n"
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "usage.html")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"report", "--report-dir", parent, "--start", "2026-09-01", "--stop", "2026-09-02", "--output", output}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("report command code=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "estimated cost: $0.000034") || !strings.Contains(stdout.String(), "repriced: 1") || !strings.Contains(stdout.String(), "unavailable: 0") {
+		t.Fatalf("report stdout=%q", stdout.String())
+	}
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "current model configuration") || !strings.Contains(string(data), "$0.000034") {
+		t.Fatalf("report did not render current pricing: %s", data)
 	}
 }
 
