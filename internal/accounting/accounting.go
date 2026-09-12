@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gregasher/bedrock-local-proxy/internal/config"
+	"github.com/gregasher/bedrock-local-proxy/internal/pricing"
 	"github.com/gregasher/bedrock-local-proxy/internal/server"
 )
 
@@ -55,6 +56,7 @@ type requestRecord struct {
 	OutputTokens                   *int64   `json:"output_tokens,omitempty"`
 	CacheReadInputTokens           *int64   `json:"cache_read_input_tokens,omitempty"`
 	CacheWriteInputTokens          *int64   `json:"cache_write_input_tokens,omitempty"`
+	InputTokensIncludeCache        bool     `json:"input_tokens_include_cache,omitempty"`
 	EstimatedCost                  *float64 `json:"estimated_cost,omitempty"`
 	CostStatus                     string   `json:"cost_status"`
 	UsageStatus                    string   `json:"usage_status"`
@@ -121,7 +123,7 @@ func (r *Recorder) Record(result server.CompletionResult) {
 	entry := requestRecord{Event: "request", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Endpoint: result.Endpoint,
 		LocalModel: result.LocalModel, UpstreamModel: result.UpstreamModel, LatencyMS: float64(result.Elapsed) / float64(time.Millisecond),
 		HTTPStatus: result.HTTPStatus, Outcome: string(result.Outcome), InputTokens: input, OutputTokens: output,
-		CacheReadInputTokens: result.CacheReadInputTokens, CacheWriteInputTokens: result.CacheWriteInputTokens,
+		CacheReadInputTokens: result.CacheReadInputTokens, CacheWriteInputTokens: result.CacheWriteInputTokens, InputTokensIncludeCache: result.InputTokensIncludeCache,
 		CostStatus: "unavailable", UsageStatus: usageStatus, ObservedUncoveredBillingFields: result.ObservedUncoveredBillingFields,
 		ClientFamily: result.ClientFamily, ClientVersion: result.ClientVersion, MetadataProfile: result.MetadataProfile,
 		MetadataRevision: result.MetadataRevision, CatalogHash: result.CatalogHash, SettingsHash: result.SettingsHash, FunctionToolCalls: result.FunctionToolCalls,
@@ -188,32 +190,18 @@ func (r *Recorder) Record(result server.CompletionResult) {
 
 func (r *Recorder) estimate(result server.CompletionResult) (float64, bool) {
 	model, ok := r.models[result.LocalModel]
-	if !ok || result.InputTokens == nil || result.OutputTokens == nil || result.ObservedUncoveredBillingFields || model.InputPerMillion == nil || model.OutputPerMillion == nil {
+	if !ok {
 		return 0, false
 	}
-	cacheRead := tokenCount(result.CacheReadInputTokens)
-	cacheWrite := tokenCount(result.CacheWriteInputTokens)
-	input := *result.InputTokens
-	if result.InputTokensIncludeCache {
-		input -= cacheRead + cacheWrite
-		if input < 0 {
-			return 0, false
-		}
-	}
-	if cacheRead > 0 && model.CacheReadInputPerMillion == nil {
-		return 0, false
-	}
-	if cacheWrite > 0 && model.CacheWriteInputPerMillion == nil {
-		return 0, false
-	}
-	cost := float64(input)/1e6*(*model.InputPerMillion) + float64(*result.OutputTokens)/1e6*(*model.OutputPerMillion)
-	if cacheRead > 0 {
-		cost += float64(cacheRead) / 1e6 * (*model.CacheReadInputPerMillion)
-	}
-	if cacheWrite > 0 {
-		cost += float64(cacheWrite) / 1e6 * (*model.CacheWriteInputPerMillion)
-	}
-	return cost, true
+	cost, reason := pricing.Estimate(model, pricing.Usage{
+		InputTokens:                    result.InputTokens,
+		OutputTokens:                   result.OutputTokens,
+		CacheReadInputTokens:           result.CacheReadInputTokens,
+		CacheWriteInputTokens:          result.CacheWriteInputTokens,
+		InputTokensIncludeCache:        result.InputTokensIncludeCache,
+		ObservedUncoveredBillingFields: result.ObservedUncoveredBillingFields,
+	})
+	return cost, reason == ""
 }
 
 func tokenCount(value *int64) int64 {

@@ -393,7 +393,7 @@ func runReport(args []string, stdout, stderr io.Writer) int {
 	startValue := flags.String("start", "", "inclusive RFC3339 start time")
 	stopValue := flags.String("stop", "", "exclusive RFC3339 stop time")
 	reportDir := flags.String("report-dir", "", "parent directory containing session reports")
-	configPath := flags.String("config", "", "optional YAML configuration for reporting.directory")
+	configPath := flags.String("config", "", "YAML configuration for report directory and current model pricing")
 	format := flags.String("format", "html", "report format: html or json")
 	output := flags.String("output", "", "output path; defaults under the report directory")
 	if err := flags.Parse(args); err != nil {
@@ -418,12 +418,12 @@ func runReport(args []string, stdout, stderr io.Writer) int {
 		diagnostic(stderr, "text", fmt.Errorf("invalid --stop: %w", err))
 		return 2
 	}
-	directory, err := resolveReportCommandDirectory(*configPath, *reportDir)
+	directory, pricingModels, reprice, err := resolveReportCommandInputs(*configPath, *reportDir)
 	if err != nil {
 		diagnostic(stderr, "text", err)
 		return 1
 	}
-	report, err := reports.Generate(reports.Options{Directory: directory, Start: start, Stop: stop})
+	report, err := reports.Generate(reports.Options{Directory: directory, Start: start, Stop: stop, Models: pricingModels, Reprice: reprice})
 	if err != nil {
 		diagnostic(stderr, "text", err)
 		return 1
@@ -453,6 +453,10 @@ func runReport(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Report: %s\n", path)
 	fmt.Fprintf(stdout, "Period: %s to %s UTC\n", report.Start, report.Stop)
 	fmt.Fprintf(stdout, "Requests: %d · success rate: %s · estimated cost: %s\n", report.Metrics.Requests, successRate(report.Metrics), periodCostSummary(report.Metrics))
+	fmt.Fprintf(stdout, "Pricing: %s · repriced: %d · stored: %d · unavailable: %d\n", report.PricingSource, report.Metrics.RepricedCostRequests, report.Metrics.StoredCostRequests, report.Metrics.MissingCostRequests)
+	for _, issue := range report.PricingIssues {
+		fmt.Fprintf(stdout, "Pricing issue: model=%s · requests=%d · %s\n", issue.Model, issue.Requests, issue.Reason)
+	}
 	return 0
 }
 
@@ -483,18 +487,34 @@ func parseReportTime(value string) (time.Time, error) {
 	return time.Time{}, errors.New("use RFC3339 (for example 2026-09-01T00:00:00Z) or YYYY-MM-DD")
 }
 
-func resolveReportCommandDirectory(configPath, override string) (string, error) {
-	if configPath == "" {
-		if strings.TrimSpace(override) != "" {
-			return config.ResolveReportDirectory("", "", override)
+func resolveReportCommandInputs(configPath, override string) (string, map[string]config.ModelConfig, bool, error) {
+	path := strings.TrimSpace(configPath)
+	explicit := path != ""
+	if path == "" {
+		var err error
+		path, err = config.DefaultPath()
+		if err != nil {
+			return "", nil, false, err
 		}
-		return config.DefaultReportDirectory()
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			directory, resolveErr := config.ResolveReportDirectory("", "", override)
+			return directory, nil, false, resolveErr
+		} else if err != nil {
+			return "", nil, false, fmt.Errorf("inspect config %q: %w", path, err)
+		}
 	}
-	cfg, err := config.LoadFile(configPath)
+	cfg, err := config.LoadFile(path)
 	if err != nil {
-		return "", err
+		if explicit {
+			return "", nil, false, err
+		}
+		return "", nil, false, fmt.Errorf("load default configuration for report pricing: %w", err)
 	}
-	return config.ResolveReportDirectory(configPath, cfg.Reporting.Directory, override)
+	directory, err := config.ResolveReportDirectory(path, cfg.Reporting.Directory, override)
+	if err != nil {
+		return "", nil, false, err
+	}
+	return directory, cfg.Models, true, nil
 }
 
 func reportOutputPath(value, directory string, start, stop time.Time, format string) (string, error) {
