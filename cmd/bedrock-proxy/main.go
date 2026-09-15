@@ -396,6 +396,7 @@ func runReport(args []string, stdout, stderr io.Writer) int {
 	configPath := flags.String("config", "", "YAML configuration for report directory and current model pricing")
 	format := flags.String("format", "html", "report format: html or json")
 	output := flags.String("output", "", "output path; defaults under the report directory")
+	reprice := flags.Bool("reprice", false, "deprecated; reports always use current configuration prices")
 	if err := flags.Parse(args); err != nil {
 		diagnostic(stderr, "text", err)
 		return 2
@@ -418,12 +419,16 @@ func runReport(args []string, stdout, stderr io.Writer) int {
 		diagnostic(stderr, "text", fmt.Errorf("invalid --stop: %w", err))
 		return 2
 	}
-	directory, pricingModels, reprice, err := resolveReportCommandInputs(*configPath, *reportDir)
+	_ = reprice
+	directory, pricingModels, configured, err := resolveReportCommandInputs(*configPath, *reportDir)
+	if err == nil && !configured {
+		err = errors.New("report requires a usable selected or default configuration for current prices")
+	}
 	if err != nil {
 		diagnostic(stderr, "text", err)
 		return 1
 	}
-	report, err := reports.Generate(reports.Options{Directory: directory, Start: start, Stop: stop, Models: pricingModels, Reprice: reprice})
+	report, err := reports.Generate(reports.Options{Directory: directory, Start: start, Stop: stop, Models: pricingModels, Reprice: true})
 	if err != nil {
 		diagnostic(stderr, "text", err)
 		return 1
@@ -453,7 +458,7 @@ func runReport(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Report: %s\n", path)
 	fmt.Fprintf(stdout, "Period: %s to %s UTC\n", report.Start, report.Stop)
 	fmt.Fprintf(stdout, "Requests: %d · success rate: %s · estimated cost: %s\n", report.Metrics.Requests, successRate(report.Metrics), periodCostSummary(report.Metrics))
-	fmt.Fprintf(stdout, "Pricing: %s · repriced: %d · stored: %d · unavailable: %d\n", report.PricingSource, report.Metrics.RepricedCostRequests, report.Metrics.StoredCostRequests, report.Metrics.MissingCostRequests)
+	fmt.Fprintf(stdout, "Pricing: current prices · priced: %d · unavailable: %d\n", report.Metrics.RepricedCostRequests, report.Metrics.MissingCostRequests)
 	for _, issue := range report.PricingIssues {
 		fmt.Fprintf(stdout, "Pricing issue: model=%s · requests=%d · %s\n", issue.Model, issue.Requests, issue.Reason)
 	}

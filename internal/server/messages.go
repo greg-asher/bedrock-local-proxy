@@ -230,6 +230,11 @@ func parseMessagesUsage(body []byte) completionUsage {
 	return parseMessagesUsageFields(response.Usage)
 }
 
+var messagesUsageKnownFields = map[string]map[string]bool{
+	"usage":                {"input_tokens": true, "output_tokens": true, "cache_read_input_tokens": true, "cache_creation_input_tokens": true, "cache_creation": true, "server_tool_use": true},
+	"usage.cache_creation": {"ephemeral_5m_input_tokens": true, "ephemeral_1h_input_tokens": true},
+}
+
 func parseMessagesUsageFields(usage map[string]json.RawMessage) completionUsage {
 	var inputTokens, outputTokens *int64
 	if raw, ok := usage["input_tokens"]; ok {
@@ -271,7 +276,7 @@ func parseMessagesUsageFields(usage map[string]json.RawMessage) completionUsage 
 			uncovered = true
 		}
 	}
-	return completionUsage{inputTokens: inputTokens, outputTokens: outputTokens, cacheReadInputTokens: cacheRead, cacheWriteInputTokens: cacheWrite, uncovered: uncovered}
+	return completionUsage{inputTokens: inputTokens, outputTokens: outputTokens, cacheReadInputTokens: cacheRead, cacheWriteInputTokens: cacheWrite, uncovered: uncovered, usageWarnings: collectUsageWarnings(usage, "usage", messagesUsageKnownFields)}
 }
 
 // messagesStreamObserver understands the native Anthropic Messages stream.
@@ -283,6 +288,7 @@ type messagesStreamObserver struct {
 	cacheReadInputTokens  *int64
 	cacheWriteInputTokens *int64
 	uncovered             bool
+	usageWarnings         []string
 	usageInvalid          bool
 	sawStop               bool
 	sawError              bool
@@ -350,6 +356,7 @@ func (o *messagesStreamObserver) observeUsage(usage map[string]json.RawMessage) 
 		o.cacheWriteInputTokens = parsed.cacheWriteInputTokens
 	}
 	o.uncovered = o.uncovered || parsed.uncovered
+	o.usageWarnings = append(o.usageWarnings, parsed.usageWarnings...)
 }
 
 func parseCacheCreationDetails(raw json.RawMessage) (*int64, bool) {
@@ -443,6 +450,7 @@ func (s *Server) serveMessagesStream(w http.ResponseWriter, r *http.Request, sta
 		result.CacheReadInputTokens = observer.cacheReadInputTokens
 		result.CacheWriteInputTokens = observer.cacheWriteInputTokens
 		result.ObservedUncoveredBillingFields = observer.uncovered
+		result.UsageWarnings = observer.usageWarnings
 	}
 	normalEnd := copyErr == nil || errors.Is(copyErr, io.EOF)
 	if response.StatusCode >= 200 && response.StatusCode < 300 && normalEnd && observer.sawStop && !observer.sawError {
@@ -450,6 +458,9 @@ func (s *Server) serveMessagesStream(w http.ResponseWriter, r *http.Request, sta
 	}
 	if errors.Is(r.Context().Err(), context.Canceled) || errors.Is(copyErr, context.Canceled) {
 		result.Outcome = CompletionCanceled
+	}
+	if result.Outcome == CompletionFailed && observer.sawError {
+		result.FailureCategory = "upstream_error"
 	}
 	s.finishCompletion(started, result)
 }

@@ -106,8 +106,8 @@ func TestEstimatesDistinguishZeroMissingAndUncoveredPrices(t *testing.T) {
 	if first.EstimatedCost == nil || *first.EstimatedCost != 0 {
 		t.Fatalf("zero-priced estimate = %v, want pointer to zero", first.EstimatedCost)
 	}
-	if second.EstimatedCost != nil || third.EstimatedCost != nil {
-		t.Fatalf("unknown estimates = %v and %v, want null", second.EstimatedCost, third.EstimatedCost)
+	if second.EstimatedCost != nil || third.EstimatedCost == nil {
+		t.Fatalf("missing and warning-only estimates = %v and %v", second.EstimatedCost, third.EstimatedCost)
 	}
 }
 

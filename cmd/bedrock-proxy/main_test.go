@@ -241,9 +241,14 @@ func TestReportCommandWritesPeriodHTMLWithoutConfig(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(session, "events.jsonl"), []byte(events), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configYAML := "version: 1\naws:\n  profile: test\n  region: us-east-1\nlisten: 127.0.0.1:8787\nmodels:\n  coding:\n    bedrock_model_id: target\n    input_per_million: 2\n    output_per_million: 3\n"
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	output := filepath.Join(t.TempDir(), "usage.html")
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"report", "--report-dir", parent, "--start", "2026-09-01T00:00:00Z", "--stop", "2026-09-02T00:00:00Z", "--output", output}, &stdout, &stderr)
+	code := run([]string{"report", "--config", configPath, "--report-dir", parent, "--start", "2026-09-01T00:00:00Z", "--stop", "2026-09-02T00:00:00Z", "--output", output}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("report command code=%d stderr=%q", code, stderr.String())
 	}
@@ -254,7 +259,7 @@ func TestReportCommandWritesPeriodHTMLWithoutConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "Request activity") || !strings.Contains(string(data), "Cost and usage by session tag") || !strings.Contains(string(data), "nightly") {
+	if !strings.Contains(string(data), "Estimated cost by day") || !strings.Contains(string(data), "Session tags") || !strings.Contains(string(data), "Requests by day") || !strings.Contains(string(data), "nightly") {
 		t.Fatalf("report HTML missing metrics: %s", data)
 	}
 	info, err := os.Stat(output)
@@ -296,15 +301,24 @@ func TestReportCommandRepricesUsageWithDefaultConfiguration(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("report command code=%d stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "estimated cost: $0.000034") || !strings.Contains(stdout.String(), "repriced: 1") || !strings.Contains(stdout.String(), "unavailable: 0") {
+	if !strings.Contains(stdout.String(), "estimated cost: $0.000034") || !strings.Contains(stdout.String(), "priced: 1") || !strings.Contains(stdout.String(), "unavailable: 0") {
 		t.Fatalf("report stdout=%q", stdout.String())
 	}
 	data, err := os.ReadFile(output)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "current model configuration") || !strings.Contains(string(data), "$0.000034") {
+	if !strings.Contains(string(data), "Current prices") || !strings.Contains(string(data), "$0.000034") {
 		t.Fatalf("report did not render current pricing: %s", data)
+	}
+}
+
+func TestReportCommandRequiresConfigurationForCurrentPrices(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"report", "--report-dir", t.TempDir(), "--start", "2026-09-01", "--stop", "2026-09-02"}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "requires a usable selected or default configuration") {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
 }
 

@@ -45,7 +45,7 @@ func TestEstimateExplainsUnavailableCosts(t *testing.T) {
 		want  Reason
 	}{
 		{name: "usage", model: config.ModelConfig{InputPerMillion: &inputPrice, OutputPerMillion: &outputPrice}, want: MissingUsage},
-		{name: "uncovered", model: config.ModelConfig{InputPerMillion: &inputPrice, OutputPerMillion: &outputPrice}, usage: Usage{InputTokens: &input, OutputTokens: &output, ObservedUncoveredBillingFields: true}, want: UncoveredBilling},
+
 		{name: "input price", model: config.ModelConfig{OutputPerMillion: &outputPrice}, usage: Usage{InputTokens: &input, OutputTokens: &output}, want: MissingInputPrice},
 		{name: "output price", model: config.ModelConfig{InputPerMillion: &inputPrice}, usage: Usage{InputTokens: &input, OutputTokens: &output}, want: MissingOutputPrice},
 		{name: "cache read price", model: config.ModelConfig{InputPerMillion: &inputPrice, OutputPerMillion: &outputPrice}, usage: Usage{InputTokens: &input, OutputTokens: &output, CacheReadInputTokens: &cacheRead}, want: MissingCacheReadPrice},
