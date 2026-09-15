@@ -227,3 +227,18 @@ func TestChatCompletionPreservesUpstreamErrorEnvelope(t *testing.T) {
 		t.Fatalf("upstream error = (%d, %q), want unchanged 403 envelope", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestUsageWarningsIncludeMalformedKnownDetailsAndUpstreamHTTP5xx(t *testing.T) {
+	usage := parseChatUsage([]byte(`{"usage":{"prompt_tokens":2,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":"invalid"}}}`))
+	if len(usage.usageWarnings) != 1 || usage.usageWarnings[0] != "usage.prompt_tokens_details.cached_tokens" {
+		t.Fatalf("warnings = %#v", usage.usageWarnings)
+	}
+
+	s := NewWithTransport(chatTestConfig(), &fakeRequestDoer{response: &http.Response{StatusCode: http.StatusInternalServerError, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":"upstream"}`))}})
+	var result CompletionResult
+	s.SetCompletionRecorder(func(got CompletionResult) { result = got })
+	s.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"coding","messages":[]}`)))
+	if result.FailureCategory != "upstream_http" {
+		t.Fatalf("failure category = %q", result.FailureCategory)
+	}
+}

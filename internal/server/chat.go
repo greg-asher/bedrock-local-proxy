@@ -48,6 +48,8 @@ type CompletionResult struct {
 	CacheWriteInputTokens          *int64
 	InputTokensIncludeCache        bool
 	ObservedUncoveredBillingFields bool
+	UsageWarnings                  []string
+	FailureCategory                string
 	ClientFamily                   string
 	ClientVersion                  string
 	FunctionToolCalls              int
@@ -67,6 +69,7 @@ type completionUsage struct {
 	cacheWriteInputTokens   *int64
 	inputTokensIncludeCache bool
 	uncovered               bool
+	usageWarnings           []string
 }
 
 func applyCompletionUsage(result *CompletionResult, usage completionUsage) {
@@ -76,6 +79,7 @@ func applyCompletionUsage(result *CompletionResult, usage completionUsage) {
 	result.CacheWriteInputTokens = usage.cacheWriteInputTokens
 	result.InputTokensIncludeCache = usage.inputTokensIncludeCache
 	result.ObservedUncoveredBillingFields = usage.uncovered
+	result.UsageWarnings = usage.usageWarnings
 }
 
 const maxUsageObservationBytes = 1 << 20
@@ -136,7 +140,7 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, context.Canceled) || transport.ClassOf(err) == transport.FailureCanceled {
 			outcome = CompletionCanceled
 		}
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: localModel, UpstreamModel: configuredTarget(s.cfg, localModel), HTTPStatus: &status, Outcome: outcome})
+		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: localModel, UpstreamModel: configuredTarget(s.cfg, localModel), HTTPStatus: &status, Outcome: outcome, FailureCategory: transportFailureCategory(outcome)})
 		return
 	}
 	if response == nil {
@@ -478,6 +482,7 @@ type chatStreamObserver struct {
 	cacheReadInputTokens  *int64
 	cacheWriteInputTokens *int64
 	uncovered             bool
+	usageWarnings         []string
 	usageInvalid          bool
 	sawDone               bool
 	sawError              bool
@@ -544,6 +549,7 @@ func (o *chatStreamObserver) observe(event sseEvent) {
 			o.uncovered = true
 		}
 	}
+	o.usageWarnings = append(o.usageWarnings, collectUsageWarnings(usage, "usage", chatUsageKnownFields)...)
 }
 
 func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, started time.Time, localModel string, response *http.Response) {
@@ -574,6 +580,7 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, started
 		result.CacheWriteInputTokens = observer.cacheWriteInputTokens
 		result.InputTokensIncludeCache = true
 		result.ObservedUncoveredBillingFields = observer.uncovered
+		result.UsageWarnings = observer.usageWarnings
 	}
 	normalEnd := copyErr == nil || errors.Is(copyErr, io.EOF)
 	if response.StatusCode >= 200 && response.StatusCode < 300 && normalEnd && observer.sawDone && !observer.sawError {
@@ -582,7 +589,58 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, started
 	if errors.Is(r.Context().Err(), context.Canceled) || errors.Is(copyErr, context.Canceled) {
 		result.Outcome = CompletionCanceled
 	}
+	if result.Outcome == CompletionFailed && observer.sawError {
+		result.FailureCategory = "upstream_error"
+	}
 	s.finishCompletion(started, result)
+}
+
+var chatUsageKnownFields = map[string]map[string]bool{
+	"usage":                           {"prompt_tokens": true, "completion_tokens": true, "total_tokens": true, "prompt_tokens_details": true, "completion_tokens_details": true},
+	"usage.prompt_tokens_details":     {"cached_tokens": true, "cache_write_tokens": true, "audio_tokens": true},
+	"usage.completion_tokens_details": {"reasoning_tokens": true, "accepted_prediction_tokens": true, "rejected_prediction_tokens": true, "audio_tokens": true},
+}
+
+// collectUsageWarnings preserves only field paths. Unknown zero and null values
+// are harmless; malformed or nonzero values may represent billing dimensions.
+func collectUsageWarnings(fields map[string]json.RawMessage, path string, known map[string]map[string]bool) []string {
+	var warnings []string
+	for key, raw := range fields {
+		fieldPath := path + "." + key
+		raw = bytes.TrimSpace(raw)
+		var child map[string]json.RawMessage
+		if json.Unmarshal(raw, &child) == nil && child != nil {
+			warnings = append(warnings, collectUsageWarnings(child, fieldPath, known)...)
+			continue
+		}
+		if known[path][key] {
+			var number float64
+			if json.Unmarshal(raw, &number) == nil {
+				continue
+			}
+			warnings = append(warnings, fieldPath)
+			continue
+		}
+		if bytes.Equal(raw, []byte("null")) || bytes.Equal(raw, []byte("0")) || bytes.Equal(raw, []byte("0.0")) {
+			continue
+		}
+		warnings = append(warnings, fieldPath)
+	}
+	sort.Strings(warnings)
+	return slicesCompactStrings(warnings)
+}
+
+func slicesCompactStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := values[:0]
+	for _, value := range values {
+		if len(out) == 0 || out[len(out)-1] != value {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func parseChatUsage(body []byte) completionUsage {
@@ -606,7 +664,7 @@ func parseChatUsage(body []byte) completionUsage {
 		}
 		uncovered = true
 	}
-	return completionUsage{inputTokens: input, outputTokens: output, cacheReadInputTokens: cacheRead, cacheWriteInputTokens: cacheWrite, inputTokensIncludeCache: true, uncovered: uncovered}
+	return completionUsage{inputTokens: input, outputTokens: output, cacheReadInputTokens: cacheRead, cacheWriteInputTokens: cacheWrite, inputTokensIncludeCache: true, uncovered: uncovered, usageWarnings: collectUsageWarnings(response.Usage, "usage", chatUsageKnownFields)}
 }
 
 func parseCacheDetails(raw json.RawMessage, readKey, writeKey string, additionalKnown map[string]bool) (*int64, *int64, bool) {
@@ -672,7 +730,28 @@ func decodeOptionalInt64(raw []byte) (*int64, bool) {
 	return &value, true
 }
 
+func transportFailureCategory(outcome CompletionOutcome) string {
+	if outcome == CompletionCanceled {
+		return "canceled"
+	}
+	return "transport"
+}
+
 func (s *Server) finishCompletion(started time.Time, result CompletionResult) {
+	if result.Outcome != CompletionSucceeded && result.FailureCategory == "" {
+		switch {
+		case result.Outcome == CompletionCanceled:
+			result.FailureCategory = "canceled"
+		case result.HTTPStatus != nil && *result.HTTPStatus >= 200 && *result.HTTPStatus < 300:
+			result.FailureCategory = "stream_incomplete"
+		case result.UpstreamModel != "" && result.HTTPStatus != nil && *result.HTTPStatus >= 400:
+			result.FailureCategory = "upstream_http"
+		case result.UpstreamModel != "":
+			result.FailureCategory = "transport"
+		default:
+			result.FailureCategory = "local_validation"
+		}
+	}
 	result.Elapsed = time.Since(started)
 	if s.record != nil {
 		s.record(result)

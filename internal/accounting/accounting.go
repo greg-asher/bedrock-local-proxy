@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +53,8 @@ type requestRecord struct {
 	LatencyMS                      float64  `json:"latency_ms"`
 	HTTPStatus                     *int     `json:"http_status,omitempty"`
 	Outcome                        string   `json:"outcome"`
+	FailureCategory                string   `json:"failure_category,omitempty"`
+	UsageWarnings                  []string `json:"usage_warnings,omitempty"`
 	InputTokens                    *int64   `json:"input_tokens,omitempty"`
 	OutputTokens                   *int64   `json:"output_tokens,omitempty"`
 	CacheReadInputTokens           *int64   `json:"cache_read_input_tokens,omitempty"`
@@ -124,7 +127,7 @@ func (r *Recorder) Record(result server.CompletionResult) {
 		LocalModel: result.LocalModel, UpstreamModel: result.UpstreamModel, LatencyMS: float64(result.Elapsed) / float64(time.Millisecond),
 		HTTPStatus: result.HTTPStatus, Outcome: string(result.Outcome), InputTokens: input, OutputTokens: output,
 		CacheReadInputTokens: result.CacheReadInputTokens, CacheWriteInputTokens: result.CacheWriteInputTokens, InputTokensIncludeCache: result.InputTokensIncludeCache,
-		CostStatus: "unavailable", UsageStatus: usageStatus, ObservedUncoveredBillingFields: result.ObservedUncoveredBillingFields,
+		CostStatus: "unavailable", UsageStatus: usageStatus, ObservedUncoveredBillingFields: result.ObservedUncoveredBillingFields, UsageWarnings: sortedWarnings(result.UsageWarnings), FailureCategory: result.FailureCategory,
 		ClientFamily: result.ClientFamily, ClientVersion: result.ClientVersion, MetadataProfile: result.MetadataProfile,
 		MetadataRevision: result.MetadataRevision, CatalogHash: result.CatalogHash, SettingsHash: result.SettingsHash, FunctionToolCalls: result.FunctionToolCalls,
 		UnsupportedFeatureRejections: result.UnsupportedFeatureRejections}
@@ -143,6 +146,9 @@ func (r *Recorder) Record(result server.CompletionResult) {
 	if costOK {
 		entry.EstimatedCost = &cost
 		entry.CostStatus = "estimated"
+	}
+	if entry.Outcome != string(server.CompletionSucceeded) && entry.FailureCategory == "" {
+		entry.FailureCategory = defaultFailureCategory(result)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -202,6 +208,31 @@ func (r *Recorder) estimate(result server.CompletionResult) (float64, bool) {
 		ObservedUncoveredBillingFields: result.ObservedUncoveredBillingFields,
 	})
 	return cost, reason == ""
+}
+
+func sortedWarnings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	copyValues := append([]string(nil), values...)
+	sort.Strings(copyValues)
+	out := copyValues[:0]
+	for _, value := range copyValues {
+		if value != "" && (len(out) == 0 || out[len(out)-1] != value) {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func defaultFailureCategory(result server.CompletionResult) string {
+	if result.Outcome == server.CompletionCanceled {
+		return "canceled"
+	}
+	if result.HTTPStatus != nil && *result.HTTPStatus >= 400 && *result.HTTPStatus < 500 {
+		return "local_validation"
+	}
+	return "internal"
 }
 
 func tokenCount(value *int64) int64 {

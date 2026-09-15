@@ -3,331 +3,342 @@ package reports
 import (
 	"bytes"
 	"fmt"
+	"html"
 	"html/template"
 	"math"
-	"strconv"
 	"strings"
 	"time"
 )
 
+const chartWidth = 900.0
+
 type htmlView struct {
 	Report           Report
-	PeriodStart      string
-	PeriodStop       string
-	GeneratedAt      string
-	SuccessRate      string
-	CostSummary      string
-	CostCoverage     string
-	UsageCoverage    string
-	AverageKnownCost string
-	SessionsSummary  string
-	ContextUsage     string
-	OutputUsage      string
-	RequestBars      []requestBar
-	CostBars         []costBar
-	RequestScale     string
-	CostScale        string
-	FirstBucket      string
-	LastBucket       string
-	Notices          []htmlNotice
-	HasRequests      bool
-	HasCompatibility bool
+	Period           string
+	PriceBasis       string
+	DataThrough      string
+	Cost             string
+	CostDetail       string
+	ProjectionLabel  string
+	ProjectionCost   string
+	ProjectionDetail string
+	SpendChart       template.HTML
+	RequestChart     template.HTML
+	ModelChart       template.HTML
+	TokenChart       template.HTML
+	FailureChart     template.HTML
 }
 
-type htmlNotice struct {
-	Tone  string
-	Title string
+type dailyPoint struct {
+	Day                         int
+	Spend                       float64
+	Requests, Success, Canceled int
+	Failures                    int
+}
+
+type chartSlice struct {
+	Name  string
+	Value float64
+	Class string
 	Text  string
 }
 
-type requestBar struct {
-	Label         string
-	Value         string
-	SuccessHeight int
-	FailureHeight int
-}
-
-type costBar struct {
-	Label  string
-	Value  string
-	Height int
-	Class  string
-}
-
-// HTML renders a private, standalone dashboard with no external assets.
-func HTML(report Report) ([]byte, error) {
-	if strings.TrimSpace(report.PricingSource) == "" {
-		report.PricingSource = "stored session estimates"
-	}
-	metrics := report.Metrics
-	knownCosts := metrics.Requests - metrics.MissingCostRequests
+func HTML(r Report) ([]byte, error) {
+	known := r.Metrics.Requests - r.Metrics.MissingCostRequests
 	view := htmlView{
-		Report:           report,
-		PeriodStart:      displayTimestamp(report.Start),
-		PeriodStop:       displayTimestamp(report.Stop),
-		GeneratedAt:      displayTimestamp(report.GeneratedAt),
-		SuccessRate:      ratio(metrics.Successes, metrics.Requests),
-		CostSummary:      costDisplay(metrics.KnownEstimatedCost, metrics.MissingCostRequests, metrics.Requests),
-		CostCoverage:     coverage(knownCosts, metrics.Requests),
-		UsageCoverage:    coverage(metrics.Requests-metrics.MissingUsageRequests, metrics.Requests),
-		AverageKnownCost: averageKnownCost(metrics.KnownEstimatedCost, knownCosts),
-		SessionsSummary:  plural(report.Sessions, "session", "sessions"),
-		ContextUsage:     utilization(metrics.AverageContextUtilization, metrics.ContextUtilizationSamples),
-		OutputUsage:      utilization(metrics.AverageOutputUtilization, metrics.OutputUtilizationSamples),
-		HasRequests:      metrics.Requests > 0,
-		HasCompatibility: len(report.MetadataProfiles)+len(report.Catalogs)+len(report.ClaudeSettings) > 0,
+		Report: r, Period: reportPeriod(r.Start, r.Stop), PriceBasis: priceBasis(r.PricingSource),
+		Cost:       estimatedCostValue(r.Metrics.KnownEstimatedCost, known, r.Metrics.Requests),
+		CostDetail: pricedRequestDetail(known, r.Metrics.Requests),
+		SpendChart: spendChart(r), RequestChart: requestChart(r),
+		ModelChart: modelChart(r), TokenChart: tokenChart(r), FailureChart: failureChart(r),
 	}
-	view.RequestBars, view.RequestScale = buildRequestBars(report.Series)
-	view.CostBars, view.CostScale = buildCostBars(report.Series)
-	if len(report.Series) > 0 {
-		view.FirstBucket = displayBucket(report.Series[0].Start)
-		view.LastBucket = displayBucket(report.Series[len(report.Series)-1].Start)
+	if r.Projection != nil {
+		view.DataThrough = "Data through " + displayDate(r.Projection.ObservedThrough)
+		view.ProjectionLabel = "Projected " + projectionMonth(r.Projection.TargetMonth) + " cost"
+		view.ProjectionCost = money(r.Projection.ProjectedKnownEstimatedCost)
+		view.ProjectionDetail = fmt.Sprintf("Based on Sep 1–%d: %d projected requests", r.Projection.ElapsedDays, r.Projection.ProjectedRequests)
+		if month := projectionMonth(r.Projection.TargetMonth); month != "" {
+			view.ProjectionDetail = fmt.Sprintf("Based on %s 1–%d: %d projected requests", month, r.Projection.ElapsedDays, r.Projection.ProjectedRequests)
+		}
 	}
-	view.Notices = buildNotices(report)
-
-	var output bytes.Buffer
-	if err := dashboardTemplate.Execute(&output, view); err != nil {
+	var b bytes.Buffer
+	if err := dashboard.Execute(&b, view); err != nil {
 		return nil, err
 	}
-	return output.Bytes(), nil
+	return b.Bytes(), nil
 }
 
-func buildNotices(report Report) []htmlNotice {
-	metrics := report.Metrics
-	var result []htmlNotice
-	if metrics.Requests == 0 {
-		return []htmlNotice{{Tone: "info", Title: "No generation requests", Text: "No generation events were recorded inside this time window."}}
+func priceBasis(source string) string {
+	if source == "current configuration (strict repricing)" {
+		return "Current prices"
 	}
-	if metrics.MissingCostRequests > 0 {
-		result = append(result, htmlNotice{Tone: "warning", Title: "Cost coverage is incomplete", Text: fmt.Sprintf("%s of %s have no estimate. The pricing diagnostics below identify the model and exact missing value.", plural(metrics.MissingCostRequests, "request", "requests"), plural(metrics.Requests, "request", "requests"))})
-	}
-	if metrics.MissingUsageRequests > 0 {
-		result = append(result, htmlNotice{Tone: "warning", Title: "Usage coverage is incomplete", Text: fmt.Sprintf("%s did not include complete input and output token counts.", plural(metrics.MissingUsageRequests, "request", "requests"))})
-	}
-	if metrics.Failures > 0 {
-		result = append(result, htmlNotice{Tone: "danger", Title: "Requests need attention", Text: fmt.Sprintf("%s failed, including %s. Use the endpoint and client sections to narrow the source.", plural(metrics.Failures, "request", "requests"), plural(metrics.Canceled, "canceled request", "canceled requests"))})
-	}
-	if report.SkippedSessions > 0 {
-		result = append(result, htmlNotice{Tone: "warning", Title: "Some sessions were skipped", Text: fmt.Sprintf("%s unreadable or did not match the report schema.", plural(report.SkippedSessions, "session directory was", "session directories were"))})
-	}
-	if len(result) == 0 {
-		result = append(result, htmlNotice{Tone: "success", Title: "Complete report coverage", Text: "Every generation request has usage and cost data, and no request failures were recorded."})
-	}
-	return result
+	return "Prices when requests ran"
 }
 
-func buildRequestBars(points []Point) ([]requestBar, string) {
-	maximum := 0
-	for _, point := range points {
-		if point.Requests > maximum {
-			maximum = point.Requests
-		}
+func reportPeriod(start, stop string) string {
+	first, err := time.Parse(time.RFC3339Nano, start)
+	if err != nil {
+		return start + " to " + stop
 	}
-	result := make([]requestBar, 0, len(points))
-	for _, point := range points {
-		totalHeight := scaleHeight(float64(point.Requests), float64(maximum))
-		failureHeight := 0
-		if point.Requests > 0 {
-			failureHeight = int(math.Round(float64(point.Failures) / float64(point.Requests) * float64(totalHeight)))
-		}
-		result = append(result, requestBar{
-			Label:         point.Start,
-			Value:         fmt.Sprintf("%s requests; %s successful; %s failed", formatInt(point.Requests), formatInt(point.Successes), formatInt(point.Failures)),
-			SuccessHeight: totalHeight - failureHeight,
-			FailureHeight: failureHeight,
-		})
+	last, err := time.Parse(time.RFC3339Nano, stop)
+	if err != nil {
+		return start + " to " + stop
 	}
-	return result, formatInt(maximum)
+	last = last.Add(-time.Nanosecond).UTC()
+	first = first.UTC()
+	if first.Day() == 1 && first.Month() == last.Month() && first.Year() == last.Year() {
+		return first.Format("January 2006")
+	}
+	if first.Year() == last.Year() && first.Month() == last.Month() {
+		return fmt.Sprintf("%s %d–%d, %d", first.Format("Jan"), first.Day(), last.Day(), first.Year())
+	}
+	return fmt.Sprintf("%s %d, %d–%s %d, %d", first.Format("Jan"), first.Day(), first.Year(), last.Format("Jan"), last.Day(), last.Year())
 }
 
-func buildCostBars(points []Point) ([]costBar, string) {
-	maximum := 0.0
-	for _, point := range points {
-		maximum = math.Max(maximum, point.KnownEstimatedCost)
+func displayDate(value string) string {
+	date, err := time.Parse("2006-01-02", value)
+	if err != nil {
+		return value
 	}
-	result := make([]costBar, 0, len(points))
-	for _, point := range points {
-		class := "complete"
-		if point.MissingCostRequests >= point.Requests && point.Requests > 0 {
-			class = "missing"
-		} else if point.MissingCostRequests > 0 {
-			class = "partial"
-		}
-		height := scaleHeight(point.KnownEstimatedCost, maximum)
-		if height == 0 && point.Requests > point.MissingCostRequests {
-			height = 3
-		}
-		result = append(result, costBar{Label: point.Start, Value: costDisplay(point.KnownEstimatedCost, point.MissingCostRequests, point.Requests), Height: height, Class: class})
-	}
-	return result, money(maximum)
+	return date.Format("Jan 2")
 }
 
-func scaleHeight(value, maximum float64) int {
-	if value <= 0 || maximum <= 0 {
-		return 0
+func projectionMonth(value string) string {
+	month, err := time.Parse("2006-01", value)
+	if err != nil {
+		return "month-end"
 	}
-	return max(3, int(math.Round(value/maximum*152)))
+	return month.Format("January")
 }
 
-func costDisplay(known float64, missing, requests int) string {
+func pricedRequestDetail(priced, requests int) string {
 	if requests == 0 {
-		return "n/a"
+		return "No requests"
 	}
-	if missing >= requests {
+	return fmt.Sprintf("Based on %d of %d requests", priced, requests)
+}
+
+func estimatedCostValue(value float64, priced, requests int) string {
+	if requests == 0 || priced == 0 {
 		return "unavailable"
 	}
-	value := money(known)
-	if missing > 0 {
-		return value + " partial"
-	}
-	return value
+	return money(value)
 }
 
-func averageKnownCost(cost float64, requests int) string {
-	if requests <= 0 {
-		return "n/a"
-	}
-	return money(cost / float64(requests))
-}
-
-func coverage(known, total int) string {
-	if total <= 0 {
-		return "n/a"
-	}
-	return fmt.Sprintf("%.1f%%", float64(max(known, 0))*100/float64(total))
-}
-
-func ratio(value, total int) string {
-	if total <= 0 {
-		return "n/a"
-	}
-	return fmt.Sprintf("%.1f%%", float64(value)*100/float64(total))
-}
-
-func utilization(value float64, samples int) string {
-	if samples == 0 {
-		return "n/a"
-	}
-	return fmt.Sprintf("%.1f%%", value*100)
-}
-
-func money(value float64) string {
-	switch {
-	case value == 0:
+func money(v float64) string {
+	if v == 0 {
 		return "$0.00"
-	case math.Abs(value) >= 100:
-		return fmt.Sprintf("$%.0f", value)
-	case math.Abs(value) >= 1:
-		return fmt.Sprintf("$%.2f", value)
-	case math.Abs(value) >= 0.01:
-		return fmt.Sprintf("$%.3f", value)
-	default:
-		return fmt.Sprintf("$%.6f", value)
 	}
-}
-
-func formatInt(value int) string { return comma(strconv.Itoa(value)) }
-
-func plural(value int, singular, plural string) string {
-	label := plural
-	if value == 1 {
-		label = singular
+	if math.Abs(v) >= 1 {
+		return fmt.Sprintf("$%.2f", v)
 	}
-	return formatInt(value) + " " + label
+	return fmt.Sprintf("$%.6f", v)
 }
-
-func formatTokens(value int64) string { return comma(strconv.FormatInt(value, 10)) }
-
-func comma(value string) string {
-	start := 0
-	if strings.HasPrefix(value, "-") {
-		start = 1
-	}
-	for position := len(value) - 3; position > start; position -= 3 {
-		value = value[:position] + "," + value[position:]
-	}
-	return value
-}
-
-func displayTimestamp(value string) string {
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
-		return value
-	}
-	return parsed.UTC().Format("Jan 2, 2006 15:04 UTC")
-}
-
-func displayBucket(value string) string {
-	parsed, err := time.Parse(time.RFC3339, value)
-	if err != nil {
-		return value
-	}
-	return parsed.UTC().Format("Jan 2 15:04")
-}
-
-func shortID(value string) string {
-	if len(value) <= 28 {
-		return value
-	}
-	return value[:12] + "…" + value[len(value)-8:]
-}
-
-func breakdownCost(value Breakdown) string {
-	return costDisplay(value.KnownEstimatedCost, value.MissingCostRequests, value.Requests)
-}
-
-func breakdownAverage(value Breakdown) string {
-	return averageKnownCost(value.KnownEstimatedCost, value.Requests-value.MissingCostRequests)
-}
-
-func breakdownShare(value Breakdown, total float64) string {
-	if total <= 0 || value.Requests <= value.MissingCostRequests {
+func costDisplay(v float64, missing, total int) string {
+	if total == 0 {
 		return "n/a"
 	}
-	return fmt.Sprintf("%.1f%%", value.KnownEstimatedCost*100/total)
+	if missing >= total {
+		return "unavailable"
+	}
+	if missing > 0 {
+		return money(v) + " (partial)"
+	}
+	return money(v)
+}
+func coverage(known, total int) string {
+	if total == 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.1f%%", float64(known)*100/float64(total))
+}
+func aliases(v Breakdown) string { return strings.Join(v.Aliases, ", ") }
+func safe(value string) string   { return html.EscapeString(value) }
+func chartTitle(title, description string) string {
+	return fmt.Sprintf(`<title>%s</title><desc>%s</desc>`, safe(title), safe(description))
+}
+func emptyChart(title string) template.HTML {
+	return template.HTML(fmt.Sprintf(`<section class="chart"><h2>%s</h2><p class="muted">No data in this report period.</p></section>`, safe(title)))
 }
 
-var dashboardTemplate = template.Must(template.New("report").Funcs(template.FuncMap{
-	"requests":   formatInt,
-	"tokens":     formatTokens,
-	"rowSuccess": func(value Breakdown) string { return ratio(value.Successes, value.Requests) },
-	"rowCoverage": func(value Breakdown) string {
-		return coverage(value.Requests-value.MissingCostRequests, value.Requests)
-	},
-	"rowCost":    breakdownCost,
-	"rowAverage": breakdownAverage,
-	"rowShare":   breakdownShare,
-	"shortID":    shortID,
-	"money":      money,
-	"dict":       func(rows []Breakdown, total float64) []any { return []any{rows, total} },
-}).Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bedrock Local Proxy usage report</title><style>
-:root{color-scheme:light;--ink:#172033;--muted:#687386;--line:#dfe4eb;--panel:#fff;--bg:#f3f5f8;--blue:#356ae6;--blue-soft:#eaf0ff;--green:#16845b;--green-soft:#e8f6f0;--amber:#a45c00;--amber-soft:#fff5df;--red:#b53b42;--red-soft:#ffedef;--shadow:0 10px 28px rgba(23,32,51,.06)}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-variant-numeric:tabular-nums}.shell{max-width:1240px;margin:0 auto;padding:36px 24px 56px}.eyebrow{color:var(--blue);font-size:12px;font-weight:750;letter-spacing:.11em;text-transform:uppercase}h1{font-size:34px;line-height:1.12;letter-spacing:-.035em;margin:6px 0 8px}h2{font-size:18px;letter-spacing:-.015em;margin:0}.period,.muted{color:var(--muted)}.period{font-size:15px}.summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:24px 0}.metric,.panel,.notice{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}.metric{padding:17px 18px;min-height:112px}.metric .label{color:var(--muted);font-size:12px;font-weight:700;letter-spacing:.045em;text-transform:uppercase}.metric strong{display:block;font-size:27px;letter-spacing:-.025em;margin:7px 0 2px}.metric small{color:var(--muted)}.notices{display:grid;gap:8px;margin:0 0 20px}.notice{padding:12px 15px;display:flex;gap:12px;box-shadow:none}.notice:before{content:"";width:4px;border-radius:4px;background:var(--blue);flex:0 0 auto}.notice.warning:before{background:var(--amber)}.notice.danger:before{background:var(--red)}.notice.success:before{background:var(--green)}.notice b{display:block;margin-bottom:1px}.notice p{margin:0;color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:14px 0}.panel{padding:18px;overflow:hidden}.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}.panel-head p{margin:3px 0 0;color:var(--muted)}.pill{border-radius:999px;background:var(--blue-soft);color:#214da7;padding:4px 9px;font-size:12px;font-weight:700;white-space:nowrap}.pill.green{background:var(--green-soft);color:#116342}.plot{height:184px;display:grid;grid-template-columns:44px minmax(0,1fr);gap:8px}.y-axis{height:160px;display:flex;flex-direction:column;justify-content:space-between;color:var(--muted);font-size:11px;text-align:right}.columns{height:160px;border-bottom:1px solid #bfc8d5;background:repeating-linear-gradient(to bottom,transparent 0,transparent 39px,#edf0f4 40px);display:flex;align-items:flex-end;gap:3px;padding:0 3px}.column{min-width:3px;flex:1;display:flex;flex-direction:column;justify-content:flex-end;height:160px}.segment.success{background:var(--blue)}.segment.failure{background:var(--red)}.segment.cost{background:var(--green);border-radius:3px 3px 0 0}.segment.cost.partial{background:var(--amber)}.segment.cost.missing{height:3px!important;background:repeating-linear-gradient(90deg,var(--red) 0,var(--red) 3px,transparent 3px,transparent 6px)}.x-axis{margin-left:52px;display:flex;justify-content:space-between;color:var(--muted);font-size:11px}.legend{display:flex;gap:14px;color:var(--muted);font-size:12px;margin-top:8px}.key:before{content:"";display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;background:var(--blue)}.key.failure:before{background:var(--red)}.key.cost:before{background:var(--green)}.key.partial:before{background:var(--amber)}.section{margin-top:18px}.section>.panel-head{padding:0 2px}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:10px}table{border-collapse:collapse;width:100%;min-width:820px;background:#fff}th,td{padding:10px 12px;text-align:right;border-bottom:1px solid #edf0f4;white-space:nowrap}th:first-child,td:first-child{text-align:left;position:sticky;left:0;background:inherit}th{color:var(--muted);font-size:11px;letter-spacing:.04em;text-transform:uppercase;background:#f8f9fb}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:#f8faff}.primary{font-weight:700}.compact table{min-width:520px}.diagnostics{margin-top:18px}.diagnostics summary{cursor:pointer;font-weight:700;font-size:16px;padding:16px 18px}.diagnostics[open] summary{border-bottom:1px solid var(--line)}.diagnostic-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;padding:14px}.diagnostic-grid .table-wrap{min-width:0}.diagnostic-grid table{min-width:0}.empty{height:184px;display:grid;place-items:center;color:var(--muted)}footer{border-top:1px solid var(--line);color:var(--muted);font-size:12px;margin-top:24px;padding-top:16px;overflow-wrap:anywhere}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}@media(max-width:900px){.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.grid,.diagnostic-grid{grid-template-columns:1fr}}@media(max-width:560px){.shell{padding:24px 14px 40px}.summary{grid-template-columns:1fr 1fr}.metric{min-height:100px;padding:14px}.metric strong{font-size:22px}h1{font-size:28px}.panel{padding:14px}.grid{grid-template-columns:1fr}}@media print{body{background:#fff}.shell{max-width:none;padding:0}.metric,.panel,.notice{box-shadow:none;break-inside:avoid}.diagnostics{display:none}}
-</style></head><body><main class="shell">
-<header><div class="eyebrow">Bedrock Local Proxy</div><h1>Usage report</h1><div class="period">{{.PeriodStart}} → {{.PeriodStop}}</div></header>
-<section class="summary" aria-label="Report summary">
-<div class="metric"><span class="label">Estimated cost</span><strong>{{.CostSummary}}</strong><small>{{.CostCoverage}} cost coverage · {{.Report.PricingSource}}</small></div>
-<div class="metric"><span class="label">Generation requests</span><strong>{{requests .Report.Metrics.Requests}}</strong><small>{{.SuccessRate}} successful · {{.SessionsSummary}}</small></div>
-<div class="metric"><span class="label">Reported tokens</span><strong>{{tokens .Report.Metrics.KnownInputTokens}} / {{tokens .Report.Metrics.KnownOutputTokens}}</strong><small>input / output · {{.UsageCoverage}} usage coverage</small></div>
-<div class="metric"><span class="label">Prompt cache</span><strong>{{tokens .Report.Metrics.KnownCacheReadInputTokens}} / {{tokens .Report.Metrics.KnownCacheWriteInputTokens}}</strong><small>read / write tokens</small></div>
-<div class="metric"><span class="label">Average known cost</span><strong>{{.AverageKnownCost}}</strong><small>{{requests .Report.Metrics.RepricedCostRequests}} repriced · {{requests .Report.Metrics.StoredCostRequests}} stored</small></div>
-<div class="metric"><span class="label">Average utilization</span><strong>{{.ContextUsage}} / {{.OutputUsage}}</strong><small>context / output ceiling</small></div>
-<div class="metric"><span class="label">Function calls</span><strong>{{requests .Report.Metrics.FunctionToolCalls}}</strong><small>{{requests .Report.Metrics.UnsupportedFeatureRejections}} unsupported feature rejections</small></div>
-<div class="metric"><span class="label">Other activity</span><strong>{{requests .Report.Metrics.ModelListEvents}}</strong><small>model-list events excluded from totals</small></div>
-</section>
-<section class="notices" aria-label="Report findings">{{range .Notices}}<div class="notice {{.Tone}}"><div><b>{{.Title}}</b><p>{{.Text}}</p></div></div>{{end}}</section>
-{{if .Report.PricingIssues}}<section class="section"><div class="panel-head"><div><h2>Pricing diagnostics</h2><p>Repricing gaps and stored-estimate fallbacks</p></div></div><div class="table-wrap"><table><thead><tr><th>Model</th><th>Requests</th><th>Issue</th></tr></thead><tbody>{{range .Report.PricingIssues}}<tr><td class="primary">{{.Model}}</td><td>{{requests .Requests}}</td><td style="text-align:left">{{.Reason}}</td></tr>{{end}}</tbody></table></div></section>{{end}}
-<section class="grid" aria-label="Trends">
-<div class="panel"><div class="panel-head"><div><h2>Request activity</h2><p>Successful and failed generations by time bucket</p></div><span class="pill">{{requests .Report.Metrics.Requests}} total</span></div>{{if .HasRequests}}<div class="plot"><div class="y-axis"><span>{{.RequestScale}}</span><span>0</span></div><div class="columns">{{range .RequestBars}}<div class="column" title="{{.Label}} · {{.Value}}"><div class="segment success" style="height:{{.SuccessHeight}}px"></div><div class="segment failure" style="height:{{.FailureHeight}}px"></div></div>{{end}}</div></div><div class="x-axis"><span>{{.FirstBucket}}</span><span>UTC</span><span>{{.LastBucket}}</span></div><div class="legend"><span class="key">Successful</span><span class="key failure">Failed or canceled</span></div>{{else}}<div class="empty">No request activity in this period</div>{{end}}</div>
-<div class="panel"><div class="panel-head"><div><h2>Estimated spend</h2><p>Recorded estimates by time bucket</p></div><span class="pill green">{{.CostSummary}}</span></div>{{if .HasRequests}}<div class="plot"><div class="y-axis"><span>{{.CostScale}}</span><span>$0</span></div><div class="columns">{{range .CostBars}}<div class="column" title="{{.Label}} · {{.Value}}"><div class="segment cost {{.Class}}" style="height:{{.Height}}px"></div></div>{{end}}</div></div><div class="x-axis"><span>{{.FirstBucket}}</span><span>UTC</span><span>{{.LastBucket}}</span></div><div class="legend"><span class="key cost">Complete</span><span class="key partial">Partial coverage</span><span class="key failure">Unavailable</span></div>{{else}}<div class="empty">No estimated spend in this period</div>{{end}}</div>
-</section>
-<section class="section"><div class="panel-head"><div><h2>Cost and usage by model</h2><p>Ranked by known estimated cost</p></div></div>{{template "usage-table" (dict .Report.Models .Report.Metrics.KnownEstimatedCost)}}</section>
-<section class="section"><div class="panel-head"><div><h2>Cost and usage by session tag</h2><p>Use tags to attribute runs to a project, workflow, or test</p></div></div>{{template "usage-table" (dict .Report.SessionTags .Report.Metrics.KnownEstimatedCost)}}</section>
-<section class="grid"><div class="panel compact"><div class="panel-head"><div><h2>Endpoints</h2><p>Protocol traffic and outcomes</p></div></div>{{template "compact-table" .Report.Endpoints}}</div><div class="panel compact"><div class="panel-head"><div><h2>Clients</h2><p>Observed client family and version</p></div></div>{{template "compact-table" .Report.Clients}}</div></section>
-{{if .HasCompatibility}}<details class="panel diagnostics"><summary>Compatibility details</summary><div class="diagnostic-grid"><div><h2>Metadata profiles</h2>{{template "diagnostic-table" .Report.MetadataProfiles}}</div><div><h2>Codex catalogs</h2>{{template "id-table" .Report.Catalogs}}</div><div><h2>Claude settings</h2>{{template "id-table" .Report.ClaudeSettings}}</div></div></details>{{end}}
-<footer>Generated {{.GeneratedAt}} from <code>{{.Report.ReportDirectory}}</code>. Cost source: {{.Report.PricingSource}}. Prices are user supplied and remain estimates.</footer>
-</main></body></html>
-{{define "usage-table"}}{{$rows := index . 0}}{{$total := index . 1}}<div class="table-wrap"><table><thead><tr><th>Name</th><th>Requests</th><th>Success</th><th>Reported input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th>Cost coverage</th><th>Estimated cost</th><th>Known cost share</th><th>Avg / priced request</th></tr></thead><tbody>{{range $rows}}<tr><td class="primary">{{.Name}}</td><td>{{requests .Requests}}</td><td>{{rowSuccess .}}</td><td>{{tokens .KnownInputTokens}}</td><td>{{tokens .KnownOutputTokens}}</td><td>{{tokens .KnownCacheReadInputTokens}}</td><td>{{tokens .KnownCacheWriteInputTokens}}</td><td>{{rowCoverage .}}</td><td>{{rowCost .}}</td><td>{{rowShare . $total}}</td><td>{{rowAverage .}}</td></tr>{{else}}<tr><td colspan="11" class="muted">No generation requests in this period.</td></tr>{{end}}</tbody></table></div>{{end}}
-{{define "compact-table"}}<div class="table-wrap"><table><thead><tr><th>Name</th><th>Requests</th><th>Success</th><th>Estimated cost</th><th>Cost coverage</th></tr></thead><tbody>{{range .}}<tr><td class="primary">{{.Name}}</td><td>{{requests .Requests}}</td><td>{{rowSuccess .}}</td><td>{{rowCost .}}</td><td>{{rowCoverage .}}</td></tr>{{else}}<tr><td colspan="5" class="muted">No data.</td></tr>{{end}}</tbody></table></div>{{end}}
-{{define "diagnostic-table"}}<div class="table-wrap"><table><thead><tr><th>Name</th><th>Requests</th><th>Failures</th></tr></thead><tbody>{{range .}}<tr><td><code title="{{.Name}}">{{shortID .Name}}</code></td><td>{{requests .Requests}}</td><td>{{requests .Failures}}</td></tr>{{else}}<tr><td colspan="3" class="muted">No data.</td></tr>{{end}}</tbody></table></div>{{end}}
-{{define "id-table"}}<div class="table-wrap"><table><thead><tr><th>Identifier</th><th>Requests</th></tr></thead><tbody>{{range .}}<tr><td><code title="{{.Name}}">{{shortID .Name}}</code></td><td>{{requests .Requests}}</td></tr>{{else}}<tr><td colspan="2" class="muted">No data.</td></tr>{{end}}</tbody></table></div>{{end}}`))
+func monthDaily(r Report) []dailyPoint {
+	if r.Projection == nil {
+		return nil
+	}
+	values := make([]dailyPoint, r.Projection.ElapsedDays)
+	for i := range values {
+		values[i].Day = i + 1
+	}
+	for _, point := range r.Series {
+		at, err := time.Parse(time.RFC3339, point.Start)
+		if err != nil || at.UTC().Format("2006-01") != r.Projection.TargetMonth || at.Day() > len(values) {
+			continue
+		}
+		entry := &values[at.Day()-1]
+		entry.Spend += point.KnownEstimatedCost
+		entry.Requests += point.Requests
+		entry.Success += point.Successes
+		entry.Canceled += point.Canceled
+		entry.Failures += point.Failures
+	}
+	return values
+}
+func chartFrame(height float64, title, description string) *strings.Builder {
+	b := &strings.Builder{}
+	fmt.Fprintf(b, `<section class="chart"><h2>%s</h2><svg viewBox="0 0 %.0f %.0f" role="img" aria-label="%s">%s`, safe(title), chartWidth, height, safe(description), chartTitle(title, description))
+	return b
+}
+func finishChart(b *strings.Builder) template.HTML {
+	b.WriteString(`</svg></section>`)
+	return template.HTML(b.String())
+}
+
+func spendChart(r Report) template.HTML {
+	if r.Projection == nil {
+		return emptyChart("Estimated cost by day")
+	}
+	days := monthDaily(r)
+	height, left, top, bottom := 280.0, 54.0, 24.0, 44.0
+	plotW, plotH := chartWidth-left-34, height-top-bottom
+	maxDaily, cumulative := 0.0, 0.0
+	for _, d := range days {
+		maxDaily = math.Max(maxDaily, d.Spend)
+	}
+	if maxDaily == 0 {
+		maxDaily = 1
+	}
+	maxCumulative := math.Max(r.Projection.ProjectedKnownEstimatedCost, r.Projection.KnownEstimatedCost)
+	if maxCumulative == 0 {
+		maxCumulative = 1
+	}
+	b := chartFrame(height, "Estimated cost by day", "Daily estimated cost, total estimated cost so far, and projected month-end cost.")
+	fmt.Fprintf(b, `<line class="axis" x1="%.0f" y1="%.0f" x2="%.0f" y2="%.0f"/><text class="axis-label" x="4" y="20">Estimated cost per day</text>`, left, top+plotH, chartWidth-34, top+plotH)
+	barW := plotW / float64(max(1, r.Projection.DaysInMonth))
+	points := make([]string, 0, len(days))
+	cumulative = 0
+	for i, d := range days {
+		x := left + float64(i)*barW
+		h := d.Spend / maxDaily * plotH
+		fmt.Fprintf(b, `<rect class="spend-bar" x="%.2f" y="%.2f" width="%.2f" height="%.2f"><title>Day %d: %s estimated cost</title></rect>`, x+1, top+plotH-h, math.Max(1, barW-2), h, d.Day, money(d.Spend))
+		cumulative += d.Spend
+		cx, cy := x+barW/2, top+plotH-cumulative/maxCumulative*plotH
+		points = append(points, fmt.Sprintf("%.2f,%.2f", cx, cy))
+		if i == 0 || i == len(days)-1 || d.Day%7 == 0 {
+			fmt.Fprintf(b, `<text class="tick" x="%.2f" y="%.0f">%d</text>`, cx, height-14, d.Day)
+		}
+	}
+	fmt.Fprintf(b, `<polyline class="cumulative" points="%s"/>`, strings.Join(points, " "))
+	if len(days) > 0 && r.Projection.DaysInMonth > r.Projection.ElapsedDays {
+		x1 := left + (float64(r.Projection.ElapsedDays)-0.5)*barW
+		x2 := left + plotW
+		y1 := top + plotH - r.Projection.KnownEstimatedCost/maxCumulative*plotH
+		y2 := top + plotH - r.Projection.ProjectedKnownEstimatedCost/maxCumulative*plotH
+		fmt.Fprintf(b, `<line class="projection" x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f"/><text class="projection-label" x="%.0f" y="%.0f">%s projected total</text>`, x1, y1, x2, y2, chartWidth-220, math.Max(18, y2-7), safe(money(r.Projection.ProjectedKnownEstimatedCost)))
+	}
+	fmt.Fprintf(b, `<text class="tick" x="%.0f" y="%.0f">%s</text><text class="tick" x="%.0f" y="%.0f">%s</text><text class="tick" x="%.0f" y="%.0f">%d</text><text class="axis-label" x="%.0f" y="%.0f">Day of month</text>`, 4.0, top+plotH, money(maxDaily), chartWidth-95, top+plotH, money(maxCumulative), left+plotW-barW/2, height-14, r.Projection.DaysInMonth, chartWidth/2-34, height-2)
+	return finishChart(b)
+}
+
+func requestChart(r Report) template.HTML {
+	days := monthDaily(r)
+	if len(days) == 0 {
+		return emptyChart("Requests by day")
+	}
+	height, left, top, bottom := 260.0, 54.0, 24.0, 42.0
+	plotW, plotH := chartWidth-left-22, height-top-bottom
+	maximum := 1
+	for _, d := range days {
+		maximum = max(maximum, d.Requests)
+	}
+	b := chartFrame(height, "Requests by day", "Daily requests split into successful, canceled, and failed outcomes.")
+	fmt.Fprintf(b, `<line class="axis" x1="%.0f" y1="%.0f" x2="%.0f" y2="%.0f"/><text class="axis-label" x="4" y="20">Requests</text>`, left, top+plotH, chartWidth-22, top+plotH)
+	barW := plotW / float64(len(days))
+	for i, d := range days {
+		x, y := left+float64(i)*barW+1, top+plotH
+		for _, part := range []struct {
+			value        int
+			class, label string
+		}{{d.Success, "outcome-success", "successful"}, {d.Canceled, "outcome-canceled", "canceled"}, {d.Failures, "outcome-failed", "failed"}} {
+			h := float64(part.value) / float64(maximum) * plotH
+			y -= h
+			fmt.Fprintf(b, `<rect class="%s" x="%.2f" y="%.2f" width="%.2f" height="%.2f"><title>Day %d: %d %s</title></rect>`, part.class, x, y, math.Max(1, barW-2), h, d.Day, part.value, part.label)
+		}
+		if i == 0 || i == len(days)-1 || d.Day%7 == 0 {
+			fmt.Fprintf(b, `<text class="tick" x="%.2f" y="%.0f">%d</text>`, x+barW/2, height-14, d.Day)
+		}
+	}
+	fmt.Fprintf(b, `<text class="tick" x="4" y="%.0f">%d</text><g class="legend"><rect class="outcome-success" x="%.0f" y="6" width="10" height="10"/><text x="%.0f" y="16">Successful</text><rect class="outcome-canceled" x="%.0f" y="6" width="10" height="10"/><text x="%.0f" y="16">Canceled</text><rect class="outcome-failed" x="%.0f" y="6" width="10" height="10"/><text x="%.0f" y="16">Failed</text></g>`, top+plotH, maximum, chartWidth-300, chartWidth-285, chartWidth-205, chartWidth-190, chartWidth-115, chartWidth-100)
+	return finishChart(b)
+}
+
+func donutChart(title, description, totalText string, slices []chartSlice) template.HTML {
+	var total float64
+	for _, slice := range slices {
+		total += slice.Value
+	}
+	if total == 0 {
+		return emptyChart(title)
+	}
+	const centerX, centerY, radius = 180.0, 120.0, 78.0
+	var b strings.Builder
+	b.WriteString(`<section class="chart donut"><h2>` + safe(title) + `</h2><svg viewBox="0 0 360 250" role="img" aria-label="` + safe(description) + `">` + chartTitle(title, description))
+	circumference, offset := 2*math.Pi*radius, 0.0
+	for _, slice := range slices {
+		if slice.Value <= 0 {
+			continue
+		}
+		dash := slice.Value / total * circumference
+		fmt.Fprintf(&b, `<circle class="donut-ring %s" cx="%.0f" cy="%.0f" r="%.0f" pathLength="%.5f" stroke-dasharray="%.5f %.5f" stroke-dashoffset="%.5f"><title>%s: %s</title></circle>`, slice.Class, centerX, centerY, radius, circumference, dash, circumference-dash, -offset, safe(slice.Name), safe(slice.Text))
+		offset += dash
+	}
+	fmt.Fprintf(&b, `<circle class="donut-hole" cx="%.0f" cy="%.0f" r="52"/><text class="donut-total" x="%.0f" y="%.0f">Total</text><text class="donut-value" x="%.0f" y="%.0f">%s</text></svg><div class="donut-legend">`, centerX, centerY, centerX, centerY-8, centerX, centerY+14, safe(totalText))
+	for _, slice := range slices {
+		if slice.Value <= 0 {
+			continue
+		}
+		fmt.Fprintf(&b, `<div class="donut-legend-item"><span class="legend-swatch %s"></span><span>%s</span><strong>%s</strong></div>`, slice.Class, safe(slice.Name), safe(slice.Text))
+	}
+	b.WriteString(`</div></section>`)
+	return template.HTML(b.String())
+}
+func modelChart(r Report) template.HTML {
+	slices := make([]chartSlice, 0, len(r.Models))
+	for i, m := range r.Models {
+		slices = append(slices, chartSlice{Name: label(m.CurrentAlias, m.Name), Value: m.KnownEstimatedCost, Class: fmt.Sprintf("slice-%d", i%6), Text: money(m.KnownEstimatedCost)})
+	}
+	return donutChart("Estimated cost by model", "Estimated cost divided by model.", money(r.Metrics.KnownEstimatedCost), slices)
+}
+func tokenChart(r Report) template.HTML {
+	m := r.Metrics
+	uncached := m.KnownInputTokens - m.KnownCacheReadInputTokens - m.KnownCacheWriteInputTokens
+	if uncached < 0 {
+		uncached = 0
+	}
+	return donutChart("Tokens by type", "Input, cache, and output tokens across the report.", formatTokens(uncached+m.KnownCacheReadInputTokens+m.KnownCacheWriteInputTokens+m.KnownOutputTokens), []chartSlice{{"Uncached input", float64(uncached), "slice-0", formatTokens(uncached)}, {"Cache read", float64(m.KnownCacheReadInputTokens), "slice-1", formatTokens(m.KnownCacheReadInputTokens)}, {"Cache write", float64(m.KnownCacheWriteInputTokens), "slice-2", formatTokens(m.KnownCacheWriteInputTokens)}, {"Output", float64(m.KnownOutputTokens), "slice-3", formatTokens(m.KnownOutputTokens)}})
+}
+func failureChart(r Report) template.HTML {
+	if len(r.FailureBreakdowns) == 0 {
+		return emptyChart("Failed requests by cause")
+	}
+	height := float64(74 + len(r.FailureBreakdowns)*30)
+	maxValue := 1
+	for _, v := range r.FailureBreakdowns {
+		maxValue = max(maxValue, v.Requests)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, `<section class="chart"><h2>Failed requests by cause</h2><svg viewBox="0 0 900 %.0f" role="img" aria-label="Failure counts by category and endpoint.">%s`, height, chartTitle("Failed requests by cause", "Failed request counts by cause and endpoint."))
+	for i, v := range r.FailureBreakdowns {
+		y := 32 + float64(i)*30
+		name := fmt.Sprintf("%s · %s", v.Category, v.Endpoint)
+		if v.HTTPStatus > 0 {
+			name += fmt.Sprintf(" · HTTP %d", v.HTTPStatus)
+		}
+		w := float64(v.Requests) / float64(maxValue) * 440
+		fmt.Fprintf(&b, `<text class="failure-label" x="0" y="%.0f">%s</text><rect class="failure-bar" x="420" y="%.0f" width="%.2f" height="16"><title>%s: %d requests</title></rect><text class="legend-value" x="%.0f" y="%.0f">%d</text>`, y, safe(name), y-13, w, safe(name), v.Requests, 430+w, y, v.Requests)
+	}
+	b.WriteString(`</svg></section>`)
+	return template.HTML(b.String())
+}
+func formatTokens(v int64) string { return fmt.Sprintf("%d", v) }
+
+var dashboard = template.Must(template.New("report").Funcs(template.FuncMap{"cost": func(v Breakdown) string { return costDisplay(v.KnownEstimatedCost, v.MissingCostRequests, v.Requests) }, "aliases": aliases}).Parse(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bedrock Local Proxy usage report</title><style>:root{--ink:#172033;--muted:#637086;--line:#dce2ea;--panel:#fff;--bg:#f4f6f9;--blue:#346ae6;--green:#16845b;--amber:#bd7600;--red:#c44750;--purple:#7655c7;--teal:#008e9b}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,sans-serif}.shell{max-width:1180px;margin:auto;padding:34px 24px 54px}h1{font-size:32px;margin:0 0 4px}h2{font-size:18px;margin:0 0 12px}.muted{color:var(--muted)}.summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:24px 0}.card,.chart,.table-wrap{background:var(--panel);border:1px solid var(--line);border-radius:10px}.card{padding:16px}.card b{font-size:24px;display:block;margin-top:4px}.charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.chart{padding:16px;overflow:hidden}.chart:first-child,.chart:nth-child(2),.chart:last-child{grid-column:1/-1}.chart svg{width:100%;height:auto;display:block}.axis{stroke:#b8c3d2;stroke-width:1}.axis-label,.tick{fill:var(--muted);font-size:11px}.spend-bar{fill:var(--blue);opacity:.62}.cumulative{fill:none;stroke:var(--green);stroke-width:3}.projection{stroke:var(--green);stroke-width:2;stroke-dasharray:7 5}.projection-label{fill:var(--green);font-size:12px;font-weight:600}.outcome-success,.slice-0{fill:var(--blue);stroke:var(--blue)}.outcome-canceled,.slice-1{fill:var(--amber);stroke:var(--amber)}.outcome-failed,.slice-2{fill:var(--red);stroke:var(--red)}.slice-3{fill:var(--purple);stroke:var(--purple)}.slice-4{fill:var(--teal);stroke:var(--teal)}.slice-5{fill:#8b6474;stroke:#8b6474}.legend text,.legend-text,.legend-value{fill:var(--muted);font-size:12px}.legend-value{text-anchor:end}.donut-ring{fill:none;stroke-width:38;transform:rotate(-90deg);transform-origin:180px 120px}.donut-hole{fill:var(--panel)}.donut-total{font-size:11px;fill:var(--muted);text-anchor:middle}.donut-value{font-size:15px;fill:var(--ink);font-weight:600;text-anchor:middle}.donut svg{max-width:360px;margin:auto}.donut-legend{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:10px 0 2px}.donut-legend-item{display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:7px;align-items:center;color:var(--muted)}.donut-legend-item strong{color:var(--ink);font-weight:600}.legend-swatch{width:12px;height:12px;display:block}.legend-swatch.slice-0{background:var(--blue)}.legend-swatch.slice-1{background:var(--amber)}.legend-swatch.slice-2{background:var(--red)}.legend-swatch.slice-3{background:var(--purple)}.legend-swatch.slice-4{background:var(--teal)}.legend-swatch.slice-5{background:#8b6474}.failure-bar{fill:var(--red);opacity:.75}.failure-label{fill:var(--ink);font-size:12px}.table-wrap{overflow:auto;margin-top:18px}table{border-collapse:collapse;width:100%;min-width:720px}th,td{padding:10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}th:first-child,td:first-child{text-align:left}th{color:var(--muted);font-size:11px;text-transform:uppercase}tbody tr:last-child td{border:0}@media(max-width:720px){.summary,.charts,.donut-legend{grid-template-columns:1fr}.chart:first-child,.chart:nth-child(2),.chart:last-child{grid-column:auto}.shell{padding:24px 14px}.card b{font-size:21px}}</style></head><body><main class="shell"><h1>Usage report</h1><p class="muted">{{.Period}} · {{.PriceBasis}}{{if .DataThrough}} · {{.DataThrough}}{{end}}</p><div class="summary"><div class="card">Requests<b>{{.Report.Metrics.Requests}}</b></div><div class="card">Request outcomes<b>{{.Report.Metrics.Successes}} successful</b><span class="muted">{{.Report.Metrics.Canceled}} canceled · {{.Report.Metrics.Failures}} failed</span></div><div class="card">Estimated cost so far<b>{{.Cost}}</b><span class="muted">{{.CostDetail}}</span></div><div class="card">{{if .ProjectionCost}}{{.ProjectionLabel}}{{else}}Projected month-end cost{{end}}<b>{{if .ProjectionCost}}{{.ProjectionCost}}{{else}}n/a{{end}}</b><span class="muted">{{if .ProjectionCost}}{{.ProjectionDetail}}{{else}}No request data{{end}}</span></div></div><div class="charts">{{.SpendChart}}{{.RequestChart}}{{.ModelChart}}{{.TokenChart}}{{.FailureChart}}</div><section><h2>Models</h2><div class="table-wrap"><table><tr><th>Upstream model</th><th>Current alias</th><th>Historical aliases</th><th>Requests</th><th>Input</th><th>Output</th><th>Estimated cost</th></tr>{{range .Report.Models}}<tr><td>{{.Name}}</td><td>{{.CurrentAlias}}</td><td>{{aliases .}}</td><td>{{.Requests}}</td><td>{{.KnownInputTokens}}</td><td>{{.KnownOutputTokens}}</td><td>{{cost .}}</td></tr>{{end}}</table></div></section><section><h2>Endpoints</h2><div class="table-wrap"><table><tr><th>Endpoint</th><th>Requests</th><th>Successful</th><th>Canceled</th><th>Failed</th><th>Estimated cost</th></tr>{{range .Report.Endpoints}}<tr><td>{{.Name}}</td><td>{{.Requests}}</td><td>{{.Successes}}</td><td>{{.Canceled}}</td><td>{{.Failures}}</td><td>{{cost .}}</td></tr>{{end}}</table></div></section><section><h2>Session tags</h2><div class="table-wrap"><table><tr><th>Tag</th><th>Requests</th><th>Estimated cost</th></tr>{{range .Report.SessionTags}}<tr><td>{{.Name}}</td><td>{{.Requests}}</td><td>{{cost .}}</td></tr>{{end}}</table></div></section><section><h2>Usage warnings</h2><div class="table-wrap"><table><tr><th>Path</th><th>Requests</th></tr>{{range .Report.UsageWarnings}}<tr><td>{{.Path}}</td><td>{{.Requests}}</td></tr>{{end}}</table></div></section><section><h2>Pricing blockers</h2><div class="table-wrap"><table><tr><th>Model</th><th>Reason</th><th>Requests</th></tr>{{range .Report.PricingIssues}}<tr><td>{{.Model}}</td><td>{{.Reason}}</td><td>{{.Requests}}</td></tr>{{end}}</table></div></section></main></body></html>`))

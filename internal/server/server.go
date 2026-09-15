@@ -155,7 +155,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(`{"error":{"message":"proxy is shutting down","type":"server_error"}}`))
-		s.finishCompletion(started, CompletionResult{Endpoint: r.URL.Path, HTTPStatus: &status, Outcome: CompletionFailed})
+		s.finishCompletion(started, CompletionResult{Endpoint: r.URL.Path, HTTPStatus: &status, Outcome: CompletionFailed, FailureCategory: "shutdown"})
 		return
 	}
 	defer s.endRequest(requestID)

@@ -30,8 +30,8 @@ var documentedOpenAICacheTargets = map[string]struct{}{
 type Reason string
 
 const (
-	MissingUsage           Reason = "missing input or output token usage"
 	UncoveredBilling       Reason = "response contains an unsupported nonzero billing dimension"
+	MissingUsage           Reason = "missing input or output token usage"
 	MissingInputPrice      Reason = "input_per_million is missing"
 	MissingOutputPrice     Reason = "output_per_million is missing"
 	MissingCacheReadPrice  Reason = "cache_read_input_per_million is missing for nonzero cache reads"
@@ -58,9 +58,6 @@ func Estimate(model config.ModelConfig, usage Usage) (float64, Reason) {
 	}
 	if *usage.InputTokens < 0 || *usage.OutputTokens < 0 || tokenCount(usage.CacheReadInputTokens) < 0 || tokenCount(usage.CacheWriteInputTokens) < 0 {
 		return 0, InvalidTokenCount
-	}
-	if usage.ObservedUncoveredBillingFields {
-		return 0, UncoveredBilling
 	}
 	if model.InputPerMillion == nil {
 		return 0, MissingInputPrice
@@ -92,6 +89,23 @@ func Estimate(model config.ModelConfig, usage Usage) (float64, Reason) {
 		cost += float64(cacheWrite) / 1e6 * (*cacheWritePrice)
 	}
 	return cost, ""
+}
+
+// EquivalentRates reports whether two configurations resolve to the same input,
+// output, and cache rates. It is used when aliases share an upstream target.
+func EquivalentRates(a, b config.ModelConfig) bool {
+	ar, aw := cachePrices(a)
+	br, bw := cachePrices(b)
+	return equalPrice(a.InputPerMillion, b.InputPerMillion) &&
+		equalPrice(a.OutputPerMillion, b.OutputPerMillion) &&
+		equalPrice(ar, br) && equalPrice(aw, bw)
+}
+
+func equalPrice(a, b *float64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 func cachePrices(model config.ModelConfig) (*float64, *float64) {

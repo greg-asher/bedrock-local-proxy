@@ -430,6 +430,12 @@ func parseResponsesUsage(body []byte) completionUsage {
 	return parseResponsesUsageFields(response.Usage)
 }
 
+var responsesUsageKnownFields = map[string]map[string]bool{
+	"usage":                       {"input_tokens": true, "output_tokens": true, "total_tokens": true, "input_tokens_details": true, "output_tokens_details": true},
+	"usage.input_tokens_details":  {"cached_tokens": true, "cache_write_tokens": true},
+	"usage.output_tokens_details": {"reasoning_tokens": true},
+}
+
 func parseResponsesUsageFields(usage map[string]json.RawMessage) completionUsage {
 	var inputTokens, outputTokens *int64
 	if raw, ok := usage["input_tokens"]; ok {
@@ -448,7 +454,7 @@ func parseResponsesUsageFields(usage map[string]json.RawMessage) completionUsage
 			break
 		}
 	}
-	return completionUsage{inputTokens: inputTokens, outputTokens: outputTokens, cacheReadInputTokens: cacheRead, cacheWriteInputTokens: cacheWrite, inputTokensIncludeCache: true, uncovered: uncovered}
+	return completionUsage{inputTokens: inputTokens, outputTokens: outputTokens, cacheReadInputTokens: cacheRead, cacheWriteInputTokens: cacheWrite, inputTokensIncludeCache: true, uncovered: uncovered, usageWarnings: collectUsageWarnings(usage, "usage", responsesUsageKnownFields)}
 }
 
 type responsesStreamObserver struct {
@@ -458,6 +464,7 @@ type responsesStreamObserver struct {
 	cacheWriteInputTokens *int64
 	functionCalls         int
 	uncovered             bool
+	usageWarnings         []string
 	sawTerminal           bool
 	sawSuccess            bool
 	sawFailure            bool
@@ -543,6 +550,7 @@ func (o *responsesStreamObserver) setUsage(usage map[string]json.RawMessage) {
 		o.cacheWriteInputTokens = parsed.cacheWriteInputTokens
 	}
 	o.uncovered = o.uncovered || parsed.uncovered
+	o.usageWarnings = append(o.usageWarnings, parsed.usageWarnings...)
 }
 
 func (s *Server) serveResponsesStream(w http.ResponseWriter, r *http.Request, started time.Time, localModel string, response *http.Response) {
@@ -571,6 +579,7 @@ func (s *Server) serveResponsesStream(w http.ResponseWriter, r *http.Request, st
 		CacheWriteInputTokens:          observer.cacheWriteInputTokens,
 		InputTokensIncludeCache:        true,
 		ObservedUncoveredBillingFields: observer.uncovered,
+		UsageWarnings:                  observer.usageWarnings,
 		FunctionToolCalls:              observer.functionCalls,
 	}
 	mergeCompletionMetadata(&result, s.responsesCompletionMetadata(r, localModel))
