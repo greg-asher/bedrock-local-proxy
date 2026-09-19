@@ -65,6 +65,7 @@ type GenerateOptions struct {
 	ConfigPath    string
 	ModelAlias    string
 	SettingsPath  string
+	Preset        string
 	ClaudeCommand string
 	Runner        CommandRunner
 }
@@ -132,7 +133,7 @@ func Generate(ctx context.Context, options GenerateOptions) (GenerateResult, err
 		return GenerateResult{}, err
 	}
 	settings, hash := buildSettings(options.Config.Listen, resolved)
-	path, err := resolveSettingsPath(options.ConfigPath, options.SettingsPath)
+	path, err := resolveSettingsPath(options.ConfigPath, options.Preset, options.SettingsPath)
 	if err != nil {
 		return GenerateResult{}, err
 	}
@@ -252,7 +253,9 @@ func ResolveModels(cfg config.Config, requested string) (Models, error) {
 	return result, nil
 }
 
-func DefaultSettingsPath(configPath string) (string, error) {
+// DefaultSettingsPath places a preset's settings under clients/<preset>/claude
+// so that presets running at the same time cannot overwrite each other.
+func DefaultSettingsPath(configPath, preset string) (string, error) {
 	path := strings.TrimSpace(configPath)
 	if path == "" {
 		var err error
@@ -264,6 +267,9 @@ func DefaultSettingsPath(configPath string) (string, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return "", fmt.Errorf("resolve config path: %w", err)
+	}
+	if preset = strings.TrimSpace(preset); preset != "" {
+		return filepath.Join(filepath.Dir(absolute), "clients", preset, "claude", "settings.json"), nil
 	}
 	return filepath.Join(filepath.Dir(absolute), "clients", "claude", "settings.json"), nil
 }
@@ -528,7 +534,7 @@ func normalizedHash(value string) string {
 	return strings.ToLower(value)
 }
 
-func resolveSettingsPath(configPath, override string) (string, error) {
+func resolveSettingsPath(configPath, preset, override string) (string, error) {
 	if value := strings.TrimSpace(override); value != "" {
 		path, err := filepath.Abs(value)
 		if err != nil {
@@ -536,7 +542,7 @@ func resolveSettingsPath(configPath, override string) (string, error) {
 		}
 		return path, nil
 	}
-	return DefaultSettingsPath(configPath)
+	return DefaultSettingsPath(configPath, preset)
 }
 
 func writeSettingsAtomic(path string, settings Settings, validate func(string) error) error {

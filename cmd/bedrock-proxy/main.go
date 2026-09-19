@@ -39,6 +39,7 @@ type record struct {
 	Version    string   `json:"version,omitempty"`
 	ReportPath string   `json:"report_path,omitempty"`
 	SessionTag string   `json:"session_tag,omitempty"`
+	Preset     string   `json:"preset,omitempty"`
 }
 
 type singleValue struct {
@@ -59,10 +60,26 @@ func (v *singleValue) Set(value string) error {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(runWith(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, stdinIsTerminal()))
 }
 
+// stdinIsTerminal decides once whether prompting is appropriate. Interactivity
+// is kept separate from the reader itself so the prompt loop can be exercised
+// in tests with an ordinary reader and no pseudo-terminal.
+func stdinIsTerminal() bool {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+// run keeps the non-interactive signature used by most callers and tests.
 func run(args []string, stdout, stderr io.Writer) int {
+	return runWith(args, strings.NewReader(""), stdout, stderr, false)
+}
+
+func runWith(args []string, stdin io.Reader, stdout, stderr io.Writer, interactive bool) int {
 	if len(args) > 0 && args[0] == "report" {
 		return runReport(args[1:], stdout, stderr)
 	}
@@ -81,6 +98,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 	}
+	if len(args) > 0 && args[0] == "preset" {
+		if len(args) < 2 || args[1] != "create" {
+			diagnostic(stderr, "text", errors.New("preset requires the create subcommand"))
+			return 2
+		}
+		return runPresetCreate(args[2:], stdin, stdout, stderr, interactive)
+	}
 	if len(args) > 0 && args[0] == "doctor" {
 		return runDoctor(args[1:], stdout, stderr)
 	}
@@ -93,6 +117,9 @@ func runConfigureClaude(args []string, stdout, stderr io.Writer) int {
 	configPath := flags.String("config", "", "path to YAML configuration")
 	model := flags.String("model", "", "override the configured Claude default model")
 	settingsPath := flags.String("settings", "", "output path for generated Claude Code settings")
+	var preset singleValue
+	preset.name = "preset"
+	flags.Var(&preset, "preset", "named preset from the configuration's presets block")
 	if err := flags.Parse(args); err != nil {
 		diagnostic(stderr, "text", err)
 		return 2
@@ -101,16 +128,17 @@ func runConfigureClaude(args []string, stdout, stderr io.Writer) int {
 		diagnostic(stderr, "text", errors.New("configure claude does not accept positional arguments"))
 		return 2
 	}
-	path, cfg, err := loadConfiguration(*configPath)
+	loaded, err := loadConfiguration(*configPath, preset.value)
 	if err != nil {
 		diagnostic(stderr, "text", err)
 		return 1
 	}
 	result, err := claude.Generate(context.Background(), claude.GenerateOptions{
-		Config:       cfg,
-		ConfigPath:   path,
+		Config:       loaded.effective,
+		ConfigPath:   loaded.path,
 		ModelAlias:   *model,
 		SettingsPath: *settingsPath,
+		Preset:       loaded.preset,
 		Runner:       claudeCommandRunner,
 	})
 	if err != nil {
@@ -153,6 +181,9 @@ func runConfigureCodex(args []string, stdout, stderr io.Writer) int {
 	configPath := flags.String("config", "", "path to YAML configuration")
 	model := flags.String("model", "", "override the configured Codex default model")
 	catalogPath := flags.String("catalog", "", "output path for the generated Codex model catalog")
+	var preset singleValue
+	preset.name = "preset"
+	flags.Var(&preset, "preset", "named preset from the configuration's presets block")
 	if err := flags.Parse(args); err != nil {
 		diagnostic(stderr, "text", err)
 		return 2
@@ -161,16 +192,17 @@ func runConfigureCodex(args []string, stdout, stderr io.Writer) int {
 		diagnostic(stderr, "text", errors.New("configure codex does not accept positional arguments"))
 		return 2
 	}
-	path, cfg, err := loadConfiguration(*configPath)
+	loaded, err := loadConfiguration(*configPath, preset.value)
 	if err != nil {
 		diagnostic(stderr, "text", err)
 		return 1
 	}
 	result, err := codex.Generate(context.Background(), codex.GenerateOptions{
-		Config:       cfg,
-		ConfigPath:   path,
+		Config:       loaded.effective,
+		ConfigPath:   loaded.path,
 		ModelAlias:   *model,
 		CatalogPath:  *catalogPath,
+		Preset:       loaded.preset,
 		ProxyVersion: version,
 		Runner:       codexCommandRunner,
 	})
@@ -178,7 +210,7 @@ func runConfigureCodex(args []string, stdout, stderr io.Writer) int {
 		diagnostic(stderr, "text", err)
 		return 1
 	}
-	profilePath, err := doctor.DefaultProfilePath()
+	profilePath, err := doctor.DefaultProfilePath(loaded.preset)
 	if err != nil {
 		diagnostic(stderr, "text", err)
 		return 1
@@ -201,7 +233,7 @@ func runConfigureCodex(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "WARNING: skipped model %s: %s\n", skipped.Alias, skipped.Reason)
 	}
 	fmt.Fprintf(stdout, "Save this profile as %s:\n\n%s\n", profilePath, result.TOML)
-	fmt.Fprintf(stdout, "Then run: codex --profile %s\n", codex.DefaultProfileName)
+	fmt.Fprintf(stdout, "Then run: codex --profile %s\n", result.ProfileName)
 	return 0
 }
 
@@ -213,6 +245,9 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	model := flags.String("model", "", "override the configured client default model")
 	settingsPath := flags.String("settings", "", "path to generated Claude Code settings")
 	live := flags.Bool("live", false, "exercise a running proxy and AWS target")
+	var preset singleValue
+	preset.name = "preset"
+	flags.Var(&preset, "preset", "named preset from the configuration's presets block")
 	if err := flags.Parse(args); err != nil {
 		diagnostic(stderr, "text", err)
 		return 2
@@ -224,14 +259,15 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	if *live && strings.TrimSpace(*client) == "" {
 		*client = "codex"
 	}
-	path, cfg, err := loadConfiguration(*configPath)
+	loaded, err := loadConfiguration(*configPath, preset.value)
 	if err != nil {
 		diagnostic(stderr, "text", err)
 		return 1
 	}
 	result := doctor.Run(context.Background(), doctor.Options{
-		Config:             cfg,
-		ConfigPath:         path,
+		Config:             loaded.effective,
+		ConfigPath:         loaded.path,
+		Preset:             loaded.preset,
 		Client:             *client,
 		ModelAlias:         *model,
 		ClaudeSettingsPath: *settingsPath,
@@ -248,20 +284,35 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func loadConfiguration(value string) (string, config.Config, error) {
+// loadedConfig carries both views a subcommand may need: the file as written,
+// which holds the full model catalog and every preset, and the effective
+// configuration a preset resolves to.
+type loadedConfig struct {
+	path      string
+	catalog   config.Config
+	effective config.Config
+	preset    string
+}
+
+func loadConfiguration(value, preset string) (loadedConfig, error) {
 	path := strings.TrimSpace(value)
 	if path == "" {
 		var err error
 		path, err = config.DefaultPath()
 		if err != nil {
-			return "", config.Config{}, err
+			return loadedConfig{}, err
 		}
 	}
 	cfg, err := config.LoadFile(path)
 	if err != nil {
-		return "", config.Config{}, err
+		return loadedConfig{}, err
 	}
-	return path, cfg, nil
+	preset = strings.TrimSpace(preset)
+	effective, err := cfg.Resolve(preset)
+	if err != nil {
+		return loadedConfig{}, err
+	}
+	return loadedConfig{path: path, catalog: cfg, effective: effective, preset: preset}, nil
 }
 
 func runProxy(args []string, stdout, stderr io.Writer) int {
@@ -274,6 +325,9 @@ func runProxy(args []string, stdout, stderr io.Writer) int {
 	var sessionTag singleValue
 	sessionTag.name = "session-tag"
 	flags.Var(&sessionTag, "session-tag", "optional ingestion tag for this session")
+	var preset singleValue
+	preset.name = "preset"
+	flags.Var(&preset, "preset", "named preset from the configuration's presets block")
 	showVersion := flags.Bool("version", false, "print version and exit")
 	if err := flags.Parse(args); err != nil {
 		diagnostic(stderr, requestedLogFormat(args), err)
@@ -299,19 +353,16 @@ func runProxy(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 	}
-	path := *configPath
-	if path == "" {
-		var err error
-		path, err = config.DefaultPath()
-		if err != nil {
-			diagnostic(stderr, *logFormat, err)
-			return 1
-		}
-	}
-	cfg, err := config.LoadFile(path)
+	loaded, err := loadConfiguration(*configPath, preset.value)
 	if err != nil {
 		diagnostic(stderr, *logFormat, err)
 		return 1
+	}
+	path, cfg := loaded.path, loaded.effective
+	// A preset supplies the session tag; --session-tag overrides it for one
+	// run, the same way --report-dir overrides reporting.directory.
+	if !sessionTag.set {
+		sessionTag.value = loaded.catalog.SessionTag(loaded.preset)
 	}
 	resolvedReportDir, err := config.ResolveReportDirectory(path, cfg.Reporting.Directory, *reportDir)
 	if err != nil {
@@ -321,6 +372,7 @@ func runProxy(args []string, stdout, stderr io.Writer) int {
 	sessionReporter, err := accounting.NewSessionReporter(accounting.SessionOptions{
 		ParentDirectory: resolvedReportDir,
 		SessionTag:      sessionTag.value,
+		Preset:          loaded.preset,
 		Version:         version,
 		RequestedListen: cfg.Listen,
 		Models:          cfg.Models,
@@ -338,7 +390,10 @@ func runProxy(args []string, stdout, stderr io.Writer) int {
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		sessionReporter.Warn("listen_failed")
-		diagnostic(stderr, *logFormat, fmt.Errorf("listen on %s: %w", cfg.Listen, err))
+		// Ports within a configuration are checked when it loads, so a bind
+		// failure here means something outside this configuration holds the
+		// address, not another preset.
+		diagnostic(stderr, *logFormat, fmt.Errorf("listen on %s: %w; this configuration's own ports do not overlap, so another process is using this address", cfg.Listen, err))
 		return 1
 	}
 	srv := server.New(cfg)
@@ -397,6 +452,9 @@ func runReport(args []string, stdout, stderr io.Writer) int {
 	format := flags.String("format", "html", "report format: html or json")
 	output := flags.String("output", "", "output path; defaults under the report directory")
 	reprice := flags.Bool("reprice", false, "deprecated; reports always use current configuration prices")
+	var preset singleValue
+	preset.name = "preset"
+	flags.Var(&preset, "preset", "limit the report to sessions recorded under this preset")
 	if err := flags.Parse(args); err != nil {
 		diagnostic(stderr, "text", err)
 		return 2
@@ -420,7 +478,7 @@ func runReport(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	_ = reprice
-	directory, pricingModels, configured, err := resolveReportCommandInputs(*configPath, *reportDir)
+	directory, pricingModels, configured, err := resolveReportCommandInputs(*configPath, *reportDir, preset.value)
 	if err == nil && !configured {
 		err = errors.New("report requires a usable selected or default configuration for current prices")
 	}
@@ -428,7 +486,7 @@ func runReport(args []string, stdout, stderr io.Writer) int {
 		diagnostic(stderr, "text", err)
 		return 1
 	}
-	report, err := reports.Generate(reports.Options{Directory: directory, Start: start, Stop: stop, Models: pricingModels, Reprice: true})
+	report, err := reports.Generate(reports.Options{Directory: directory, Start: start, Stop: stop, Models: pricingModels, Preset: preset.value, Reprice: true})
 	if err != nil {
 		diagnostic(stderr, "text", err)
 		return 1
@@ -456,6 +514,9 @@ func runReport(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "Report: %s\n", path)
+	if preset.value != "" {
+		fmt.Fprintf(stdout, "Preset: %s\n", preset.value)
+	}
 	fmt.Fprintf(stdout, "Period: %s to %s UTC\n", report.Start, report.Stop)
 	fmt.Fprintf(stdout, "Requests: %d · success rate: %s · estimated cost: %s\n", report.Metrics.Requests, successRate(report.Metrics), periodCostSummary(report.Metrics))
 	fmt.Fprintf(stdout, "Pricing: current prices · priced: %d · unavailable: %d\n", report.Metrics.RepricedCostRequests, report.Metrics.MissingCostRequests)
@@ -492,7 +553,12 @@ func parseReportTime(value string) (time.Time, error) {
 	return time.Time{}, errors.New("use RFC3339 (for example 2026-09-01T00:00:00Z) or YYYY-MM-DD")
 }
 
-func resolveReportCommandInputs(configPath, override string) (string, map[string]config.ModelConfig, bool, error) {
+// resolveReportCommandInputs returns the report directory and the pricing
+// catalog. The catalog is deliberately the unfiltered top-level models map: a
+// preset narrows which sessions are reported, never which prices are known.
+// Pricing a historical request against a preset's subset would silently report
+// its cost as unavailable.
+func resolveReportCommandInputs(configPath, override, preset string) (string, map[string]config.ModelConfig, bool, error) {
 	path := strings.TrimSpace(configPath)
 	explicit := path != ""
 	if path == "" {
@@ -514,6 +580,11 @@ func resolveReportCommandInputs(configPath, override string) (string, map[string
 			return "", nil, false, err
 		}
 		return "", nil, false, fmt.Errorf("load default configuration for report pricing: %w", err)
+	}
+	if preset = strings.TrimSpace(preset); preset != "" {
+		if _, err := cfg.Resolve(preset); err != nil {
+			return "", nil, false, err
+		}
 	}
 	directory, err := config.ResolveReportDirectory(path, cfg.Reporting.Directory, override)
 	if err != nil {
@@ -585,9 +656,12 @@ func startup(stdout io.Writer, format string, cfg config.Config, address string,
 	}
 	sort.Strings(names)
 	if format == "json" {
-		return json.NewEncoder(stdout).Encode(record{Event: "startup", Profile: cfg.AWS.Profile, Region: cfg.AWS.Region, Listen: "http://" + address + "/v1", Models: names, ReportPath: session.Directory, SessionTag: session.SessionTag})
+		return json.NewEncoder(stdout).Encode(record{Event: "startup", Profile: cfg.AWS.Profile, Region: cfg.AWS.Region, Listen: "http://" + address + "/v1", Models: names, ReportPath: session.Directory, SessionTag: session.SessionTag, Preset: session.Preset})
 	}
 	fmt.Fprintln(stdout, "Bedrock Local Proxy")
+	if session.Preset != "" {
+		fmt.Fprintf(stdout, "Preset:      %s\n", session.Preset)
+	}
 	fmt.Fprintf(stdout, "Listening:   http://%s/v1\n", address)
 	fmt.Fprintf(stdout, "AWS profile: %s\n", cfg.AWS.Profile)
 	fmt.Fprintf(stdout, "Region:      %s\n", cfg.AWS.Region)

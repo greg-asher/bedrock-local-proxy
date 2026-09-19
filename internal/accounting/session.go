@@ -12,8 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/gregasher/bedrock-local-proxy/internal/config"
 )
@@ -39,6 +37,7 @@ const (
 type SessionOptions struct {
 	ParentDirectory string
 	SessionTag      string
+	Preset          string
 	Version         string
 	RequestedListen string
 	Models          map[string]config.ModelConfig
@@ -49,6 +48,7 @@ type SessionInfo struct {
 	Directory  string
 	SessionID  string
 	SessionTag string
+	Preset     string
 }
 
 type sessionModel struct {
@@ -64,6 +64,7 @@ type sessionManifest struct {
 	SchemaVersion   int            `json:"schema_version"`
 	SessionID       string         `json:"session_id"`
 	SessionTag      string         `json:"session_tag,omitempty"`
+	Preset          string         `json:"preset,omitempty"`
 	Status          SessionStatus  `json:"status"`
 	StartedAt       string         `json:"started_at"`
 	FinishedAt      string         `json:"finished_at,omitempty"`
@@ -79,6 +80,7 @@ type startupEvent struct {
 	Timestamp  string         `json:"timestamp"`
 	SessionID  string         `json:"session_id"`
 	SessionTag string         `json:"session_tag,omitempty"`
+	Preset     string         `json:"preset,omitempty"`
 	ReportPath string         `json:"report_path"`
 	Listen     string         `json:"listen"`
 	Models     []sessionModel `json:"models"`
@@ -89,6 +91,7 @@ type warningEvent struct {
 	Timestamp  string `json:"timestamp"`
 	SessionID  string `json:"session_id"`
 	SessionTag string `json:"session_tag,omitempty"`
+	Preset     string `json:"preset,omitempty"`
 	Code       string `json:"code"`
 }
 
@@ -103,24 +106,15 @@ type SessionReporter struct {
 	summary        *summaryRecord
 }
 
-// NormalizeSessionTag validates and trims the optional ingestion tag.
+// NormalizeSessionTag validates and trims the optional ingestion tag. The
+// rule lives in internal/config so that `--session-tag` and a preset's
+// configured session_tag accept exactly the same values.
 func NormalizeSessionTag(value string) (string, error) {
-	if !utf8.ValidString(value) {
-		return "", fmt.Errorf("session tag must be valid UTF-8")
+	tag, err := config.NormalizeSessionTag(value)
+	if err != nil {
+		return "", fmt.Errorf("session tag %w", err)
 	}
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", fmt.Errorf("session tag must not be empty")
-	}
-	if len([]byte(value)) > 128 {
-		return "", fmt.Errorf("session tag must be at most 128 UTF-8 bytes")
-	}
-	for _, r := range value {
-		if unicode.IsControl(r) {
-			return "", fmt.Errorf("session tag must not contain control characters")
-		}
-	}
-	return value, nil
+	return tag, nil
 }
 
 // NewSessionReporter initializes report storage before the proxy binds its
@@ -163,6 +157,7 @@ func NewSessionReporter(options SessionOptions) (*SessionReporter, error) {
 		SchemaVersion:   reportSchemaVersion,
 		SessionID:       id,
 		SessionTag:      options.SessionTag,
+		Preset:          options.Preset,
 		Status:          SessionRunning,
 		StartedAt:       started.Format(time.RFC3339Nano),
 		Version:         options.Version,
@@ -187,7 +182,7 @@ func NewSessionReporter(options SessionOptions) (*SessionReporter, error) {
 }
 
 func (r *SessionReporter) Info() SessionInfo {
-	return SessionInfo{Directory: r.directory, SessionID: r.manifest.SessionID, SessionTag: r.manifest.SessionTag}
+	return SessionInfo{Directory: r.directory, SessionID: r.manifest.SessionID, SessionTag: r.manifest.SessionTag, Preset: r.manifest.Preset}
 }
 
 // Start marks the listener as available and writes the startup event.
@@ -199,7 +194,7 @@ func (r *SessionReporter) Start(listen string) error {
 	if err := writeJSONAtomic(filepath.Join(r.directory, "session.json"), r.manifest); err != nil {
 		return err
 	}
-	return r.writeEventLocked(startupEvent{Event: "startup", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), SessionID: r.manifest.SessionID, SessionTag: r.manifest.SessionTag, ReportPath: r.directory, Listen: listen, Models: r.manifest.Models})
+	return r.writeEventLocked(startupEvent{Event: "startup", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), SessionID: r.manifest.SessionID, SessionTag: r.manifest.SessionTag, Preset: r.manifest.Preset, ReportPath: r.directory, Listen: listen, Models: r.manifest.Models})
 }
 
 func (r *SessionReporter) HasCleanupWarning() bool { return r.cleanupWarning }
@@ -208,7 +203,7 @@ func (r *SessionReporter) HasCleanupWarning() bool { return r.cleanupWarning }
 func (r *SessionReporter) Warn(code string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	_ = r.writeEventLocked(warningEvent{Event: "warning", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), SessionID: r.manifest.SessionID, SessionTag: r.manifest.SessionTag, Code: code})
+	_ = r.writeEventLocked(warningEvent{Event: "warning", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), SessionID: r.manifest.SessionID, SessionTag: r.manifest.SessionTag, Preset: r.manifest.Preset, Code: code})
 }
 
 func (r *SessionReporter) RecordRequest(entry requestRecord) {
@@ -216,6 +211,7 @@ func (r *SessionReporter) RecordRequest(entry requestRecord) {
 	defer r.mu.Unlock()
 	entry.SessionID = r.manifest.SessionID
 	entry.SessionTag = r.manifest.SessionTag
+	entry.Preset = r.manifest.Preset
 	_ = r.writeEventLocked(entry)
 }
 
@@ -240,6 +236,7 @@ func (r *SessionReporter) Finalize(status SessionStatus) {
 	}
 	summary.SessionID = r.manifest.SessionID
 	summary.SessionTag = r.manifest.SessionTag
+	summary.Preset = r.manifest.Preset
 	summary.StartedAt = r.manifest.StartedAt
 	summary.FinishedAt = r.manifest.FinishedAt
 	summary.Status = string(status)

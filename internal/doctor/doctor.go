@@ -53,6 +53,7 @@ func (r Result) OK() bool {
 type Options struct {
 	Config             config.Config
 	ConfigPath         string
+	Preset             string
 	Client             string
 	ModelAlias         string
 	CatalogPath        string
@@ -124,7 +125,7 @@ func Run(ctx context.Context, options Options) Result {
 
 	profilePath := strings.TrimSpace(options.ProfilePath)
 	if profilePath == "" {
-		profilePath, err = DefaultProfilePath()
+		profilePath, err = DefaultProfilePath(options.Preset)
 		if err != nil {
 			result.Checks = append(result.Checks, Check{Name: "Codex profile", Status: Failed, Category: "codex_compatibility", Message: err.Error()})
 			return result
@@ -137,7 +138,7 @@ func Run(ctx context.Context, options Options) Result {
 		}
 	}
 	if catalogPath == "" {
-		catalogPath, err = codex.DefaultCatalogPath(options.ConfigPath)
+		catalogPath, err = codex.DefaultCatalogPath(options.ConfigPath, options.Preset)
 		if err != nil {
 			result.Checks = append(result.Checks, Check{Name: "Codex catalog", Status: Failed, Category: "codex_compatibility", Message: err.Error()})
 			return result
@@ -216,7 +217,7 @@ func runClaude(ctx context.Context, options Options) []Check {
 
 	settingsPath := strings.TrimSpace(options.ClaudeSettingsPath)
 	if settingsPath == "" {
-		settingsPath, err = claude.DefaultSettingsPath(options.ConfigPath)
+		settingsPath, err = claude.DefaultSettingsPath(options.ConfigPath, options.Preset)
 		if err != nil {
 			return append(checks, Check{Name: "Claude settings", Status: Failed, Category: "claude_compatibility", Message: err.Error()})
 		}
@@ -252,18 +253,23 @@ func formatClaudeSkipped(models []claude.SkippedModel) string {
 	return strings.Join(values, "; ")
 }
 
-func DefaultProfilePath() (string, error) {
+// DefaultProfilePath returns the Codex overlay file for a preset. Codex
+// silently ignores a missing profile file, so a wrong path here means Codex
+// bypasses the proxy without warning; doctor checking the exact expected file
+// is the mitigation.
+func DefaultProfilePath(preset string) (string, error) {
+	name := codex.ProfileName(preset)
 	if home := strings.TrimSpace(os.Getenv("CODEX_HOME")); home != "" {
 		if !filepath.IsAbs(home) {
 			return "", errors.New("CODEX_HOME must be an absolute path")
 		}
-		return filepath.Join(home, codex.DefaultProfileName+".config.toml"), nil
+		return filepath.Join(home, name+".config.toml"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve user home: %w", err)
 	}
-	return filepath.Join(home, ".codex", codex.DefaultProfileName+".config.toml"), nil
+	return filepath.Join(home, ".codex", name+".config.toml"), nil
 }
 
 func reportDirectoryCheck(configPath string, cfg config.Config) Check {

@@ -133,6 +133,12 @@ Configuration fields:
 | `codex.default_model` | no | Default alias written to the generated Codex profile. Required when more than one configured alias is Codex-compatible unless `--model` is supplied. |
 | `claude.default_model` | no | Default alias selected by generated Claude Code settings. Required when more than one configured alias is Claude-compatible unless `--model` is supplied. |
 | `claude.subagent_model` | no | Alias used for Claude Code subagents. Defaults to the effective Claude main model. |
+| `presets.<name>.listen` | yes, within a preset | Loopback address for this preset. Must differ from every other preset and from the top-level `listen`, checked when the configuration loads. |
+| `presets.<name>.session_tag` | no | Ingestion tag recorded in this preset's session reports. `--session-tag` overrides it for one run. |
+| `presets.<name>.models` | no | Aliases from the shared catalog this preset allows. Omit to allow every model; an empty list is rejected. |
+| `presets.<name>.codex.default_model` | no | Codex default for this preset. Required when the top-level default is outside this preset's models. |
+| `presets.<name>.claude.default_model` | no | Claude default for this preset. Required when the top-level default is outside this preset's models. |
+| `presets.<name>.claude.subagent_model` | no | Claude subagent model for this preset. |
 | `models.<alias>.display_name` | no | Human-readable label for the configured target; the alias remains the client-facing model name. |
 | `models.<alias>.bedrock_model_id` | yes | Bedrock model ID or inference-profile ID. |
 | `models.<alias>.input_per_million` | no | Input price in dollars per million tokens, used only for estimated logs. `0` is valid. |
@@ -189,11 +195,74 @@ aws sso login --profile YOUR_AWS_PROFILE
 bedrock-proxy
 ```
 
-Successful startup prints the local URL, AWS profile, Bedrock region, configured aliases, and the absolute session-report path. `--session-tag` also prints the supplied tag. Startup does not contact AWS; the first generation request loads credentials, signs the request, and proves model access. Stop the proxy with `Ctrl-C`. It stops admitting new requests and drains active requests for up to five seconds.
+Successful startup prints the local URL, AWS profile, Bedrock region, configured aliases, and the absolute session-report path. `--session-tag` also prints the supplied tag, and `--preset` prints the preset in use. Startup does not contact AWS; the first generation request loads credentials, signs the request, and proves model access. Stop the proxy with `Ctrl-C`. It stops admitting new requests and drains active requests for up to five seconds.
 
-Every run writes a private report by default. The parent directory is `$XDG_STATE_HOME/bedrock-proxy/sessions` when `XDG_STATE_HOME` is an absolute path, otherwise `~/.local/state/bedrock-proxy/sessions`. Use `reporting.directory` for a persistent override or `--report-dir` for one run; relative CLI paths resolve from the current directory.
+Every run writes a private report by default. The parent directory is `$XDG_STATE_HOME/bedrock-proxy/sessions` when `XDG_STATE_HOME` is an absolute path, otherwise `~/.local/state/bedrock-proxy/sessions`. Use `reporting.directory` for a persistent override or `--report-dir` for one run; relative CLI paths resolve from the current directory. A preset can set its own `session_tag`, which `--session-tag` overrides for a single run.
 
 Each report contains `session.json`, `events.jsonl`, and `summary.json`. The report retains request outcome, endpoint, alias, configured Bedrock target ID, latency, status, observed input, output, cache-read and cache-write token counts, and estimated cost. It does not retain the AWS profile, prompts, completions, tool content, request bodies, headers, credentials, or raw upstream errors. Report directories use owner-only permissions and recognized reports older than 30 days are removed when the proxy starts. Cleanup warnings do not stop the proxy.
+
+## Run several setups with presets
+
+A **preset** is a named entry in `config.yaml` that gives one setup its own port, session tag, and slice of the model catalog. Models, pricing, and capabilities stay written once at the top level; a preset only narrows them. Presets are optional, and a configuration without them behaves exactly as before.
+
+Create one interactively. The command scans for a free loopback port, lists your catalog, and adds the preset to `config.yaml`:
+
+```sh
+bedrock-proxy preset create
+```
+
+Every answer also has a flag, so the command works in a script or CI. Off a terminal a missing required setting is a usage error naming its flag, and nothing is prompted or defaulted silently:
+
+```sh
+bedrock-proxy preset create --name cheap --models luna --session-tag cheap
+```
+
+Use `--dry-run` to print the YAML block without writing. The insert preserves your file: comments, blank lines, quoting, and key order all survive, and the result is parsed and validated before it replaces the original. A `presets:` key written in flow style is not edited; the command says so and prints the block for you to paste.
+
+The result looks like this:
+
+```yaml
+listen: 127.0.0.1:8787        # the unnamed default's port
+
+models:                       # the shared catalog
+  luna:  { ... }
+  fable: { ... }
+
+presets:
+  cheap:
+    listen: 127.0.0.1:8788
+    session_tag: cheap
+    models: [luna]            # omit to allow every model
+```
+
+Every subcommand takes `--preset`:
+
+```sh
+bedrock-proxy --preset cheap
+bedrock-proxy configure codex --preset cheap
+bedrock-proxy configure claude --preset cheap
+bedrock-proxy doctor --preset cheap --client codex
+bedrock-proxy report --preset cheap --start 2026-09-01 --stop 2026-09-08
+```
+
+`--preset` and `--config` compose: `--config` chooses the file, `--preset` chooses an entry inside it.
+
+A preset restricts what the proxy will serve, not just what clients are shown. A request for a model the preset does not allow is refused locally, before any AWS request, and the error names the models that preset does allow. `/v1/models` lists only the allowed set, and so do the generated Codex catalog and Claude model picker.
+
+Ports are checked when the configuration loads, not when the proxy binds. Every preset needs a port that no other preset and not the top-level `listen` uses, so several presets can run at the same time. `preset create` picks a free one for you.
+
+Each preset gets its own generated client files, so simultaneous presets never overwrite each other:
+
+| | No preset | Preset `cheap` |
+| --- | --- | --- |
+| Codex catalog | `~/.config/bedrock-proxy/clients/codex/models.json` | `~/.config/bedrock-proxy/clients/cheap/codex/models.json` |
+| Codex profile | `~/.codex/bedrock-local.config.toml` | `~/.codex/bedrock-local-cheap.config.toml` |
+| Codex launch | `codex --profile bedrock-local` | `codex --profile bedrock-local-cheap` |
+| Claude settings | `~/.config/bedrock-proxy/clients/claude/settings.json` | `~/.config/bedrock-proxy/clients/cheap/claude/settings.json` |
+
+Codex layers `$CODEX_HOME/<name>.config.toml` over your base configuration, so each preset is a separate overlay file. Codex silently ignores a profile file that does not exist, which means a mistyped preset name makes Codex bypass the proxy with no warning. Run `bedrock-proxy doctor --preset NAME --client codex` to confirm the expected file is there.
+
+Session reports record the preset name alongside the session tag. `report --preset NAME` limits a report to that preset, and every report includes a per-preset breakdown. Reports always price against the full catalog, never a preset's narrowing, so a historical request for a model a preset no longer allows still reports its cost.
 
 ## Create a period report
 
@@ -205,7 +274,7 @@ bedrock-proxy report \
   --stop 2026-09-08T00:00:00Z
 ```
 
-`--start` is inclusive and `--stop` is exclusive, so adjacent reports do not double-count requests. Both accept RFC3339 timestamps or `YYYY-MM-DD`. The default report is an owner-only HTML file under `<report-parent>/summaries`; the command prints its absolute path. Use `--report-dir` to read a different report parent, `--config` to select both a configuration file’s `reporting.directory` and its model prices, `--output PATH` to choose the output file, or `--format json` for the structured aggregate without charts. A report labels cost as `partial` when only some requests have estimates and `unavailable` when none do, instead of displaying a misleading zero.
+`--start` is inclusive and `--stop` is exclusive, so adjacent reports do not double-count requests. Both accept RFC3339 timestamps or `YYYY-MM-DD`. The default report is an owner-only HTML file under `<report-parent>/summaries`; the command prints its absolute path. Use `--report-dir` to read a different report parent, `--preset` to limit the report to one preset's sessions, `--config` to select both a configuration file’s `reporting.directory` and its model prices, `--output PATH` to choose the output file, or `--format json` for the structured aggregate without charts. A report labels cost as `partial` when only some requests have estimates and `unavailable` when none do, instead of displaying a misleading zero.
 
 The local API is available at:
 

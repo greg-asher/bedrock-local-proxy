@@ -52,3 +52,17 @@ models:
     #   tools:
     #     function_calling: true
     #     parallel_calls: false
+
+# Optional named presets. A preset narrows the shared catalog above and gives
+# one setup its own port and session tag; models, pricing, and capabilities
+# stay written once. Every preset needs a port no other preset and not the
+# top-level `listen` uses, so several can run at the same time.
+#
+# Create one with: bedrock-proxy preset create
+# Then run it with: bedrock-proxy --preset cheap
+#
+# presets:
+#   cheap:
+#     listen: 127.0.0.1:8788
+#     session_tag: cheap
+#     models: [luna]        # omit to allow every model

@@ -169,7 +169,7 @@ func TestValidateSettingsDetectsDriftAndExtraJSON(t *testing.T) {
 }
 
 func TestDefaultSettingsPathUsesConfigDirectory(t *testing.T) {
-	path, err := DefaultSettingsPath(filepath.Join(t.TempDir(), "custom", "proxy.yaml"))
+	path, err := DefaultSettingsPath(filepath.Join(t.TempDir(), "custom", "proxy.yaml"), "")
 	if err != nil {
 		t.Fatal(err)
 	}

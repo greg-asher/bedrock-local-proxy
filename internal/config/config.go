@@ -22,13 +22,25 @@ const (
 
 // Config is the complete version 1 configuration file.
 type Config struct {
-	Version   int                    `yaml:"version"`
-	AWS       AWSConfig              `yaml:"aws"`
-	Listen    string                 `yaml:"listen"`
-	Reporting ReportingConfig        `yaml:"reporting,omitempty"`
-	Codex     CodexConfig            `yaml:"codex,omitempty"`
-	Claude    ClaudeConfig           `yaml:"claude,omitempty"`
-	Models    map[string]ModelConfig `yaml:"models"`
+	Version   int                     `yaml:"version"`
+	AWS       AWSConfig               `yaml:"aws"`
+	Listen    string                  `yaml:"listen"`
+	Reporting ReportingConfig         `yaml:"reporting,omitempty"`
+	Codex     CodexConfig             `yaml:"codex,omitempty"`
+	Claude    ClaudeConfig            `yaml:"claude,omitempty"`
+	Models    map[string]ModelConfig  `yaml:"models"`
+	Presets   map[string]PresetConfig `yaml:"presets,omitempty"`
+}
+
+// PresetConfig narrows the shared model catalog and gives one named setup its
+// own port and session tag. Presets never redefine a model; they select from
+// the single top-level catalog so pricing and capabilities are written once.
+type PresetConfig struct {
+	Listen     string       `yaml:"listen"`
+	SessionTag string       `yaml:"session_tag,omitempty"`
+	Models     []string     `yaml:"models,omitempty"`
+	Codex      CodexConfig  `yaml:"codex,omitempty"`
+	Claude     ClaudeConfig `yaml:"claude,omitempty"`
 }
 
 type AWSConfig struct {
@@ -241,7 +253,170 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	return c.validatePresets()
+}
+
+// validatePresets checks every rule that can be decided from the single
+// configuration document: name shape, catalog references, client defaults
+// inside each preset's own subset, and port uniqueness. Deciding port
+// conflicts here rather than at bind time is what makes simultaneously
+// running presets safe by construction.
+func (c *Config) validatePresets() error {
+	if len(c.Presets) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(c.Presets))
+	for name := range c.Presets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	// The unnamed default configuration stays startable, so its port is
+	// reserved against every preset as well.
+	claimed := map[string]string{c.Listen: "the top-level listen"}
+	for _, name := range names {
+		preset := c.Presets[name]
+		if err := ValidatePresetName(name); err != nil {
+			return fmt.Errorf("presets.%s: %w", name, err)
+		}
+		if strings.TrimSpace(preset.Listen) == "" {
+			return fmt.Errorf("presets.%s.listen is required", name)
+		}
+		if err := ValidateListenAddress(preset.Listen); err != nil {
+			return fmt.Errorf("presets.%s.%w", name, err)
+		}
+		if owner, taken := claimed[preset.Listen]; taken {
+			return fmt.Errorf("presets.%s.listen %q is already used by %s", name, preset.Listen, owner)
+		}
+		claimed[preset.Listen] = "presets." + name
+		allowed, err := preset.allowedModels(c.Models, name)
+		if err != nil {
+			return err
+		}
+		for _, selection := range []struct{ field, alias string }{
+			{"codex.default_model", firstNonEmpty(preset.Codex.DefaultModel, c.Codex.DefaultModel)},
+			{"claude.default_model", firstNonEmpty(preset.Claude.DefaultModel, c.Claude.DefaultModel)},
+			{"claude.subagent_model", firstNonEmpty(preset.Claude.SubagentModel, c.Claude.SubagentModel)},
+		} {
+			if selection.alias == "" {
+				continue
+			}
+			if _, ok := allowed[selection.alias]; !ok {
+				return fmt.Errorf("presets.%s: effective %s %q is not in this preset's models; add it or set presets.%s.%s", name, selection.field, selection.alias, name, selection.field)
+			}
+		}
+		if preset.SessionTag != "" {
+			if err := validateSessionTag(preset.SessionTag); err != nil {
+				return fmt.Errorf("presets.%s.session_tag %w", name, err)
+			}
+		}
+	}
 	return nil
+}
+
+// allowedModels resolves a preset's model selection against the shared
+// catalog. An omitted list means the whole catalog; an empty list is an error
+// rather than a proxy that can serve nothing.
+func (p PresetConfig) allowedModels(catalog map[string]ModelConfig, name string) (map[string]ModelConfig, error) {
+	if p.Models == nil {
+		allowed := make(map[string]ModelConfig, len(catalog))
+		for alias, model := range catalog {
+			allowed[alias] = model
+		}
+		return allowed, nil
+	}
+	if len(p.Models) == 0 {
+		return nil, fmt.Errorf("presets.%s.models must not be empty; omit it to allow every model", name)
+	}
+	allowed := make(map[string]ModelConfig, len(p.Models))
+	for _, alias := range p.Models {
+		if alias != strings.TrimSpace(alias) {
+			return nil, fmt.Errorf("presets.%s.models entry %q must not have surrounding whitespace", name, alias)
+		}
+		if _, seen := allowed[alias]; seen {
+			return nil, fmt.Errorf("presets.%s.models lists %q more than once", name, alias)
+		}
+		model, ok := catalog[alias]
+		if !ok {
+			return nil, fmt.Errorf("presets.%s.models %q is not a configured model", name, alias)
+		}
+		allowed[alias] = model
+	}
+	return allowed, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// Resolve returns the effective configuration for one preset: the shared
+// catalog narrowed to the preset's models, its port, and its client defaults.
+// The result is an ordinary Config, so nothing downstream needs to know that
+// presets exist. An empty name returns the configuration unchanged.
+func (c Config) Resolve(preset string) (Config, error) {
+	name := strings.TrimSpace(preset)
+	if name == "" {
+		resolved := c
+		resolved.Presets = nil
+		return resolved, nil
+	}
+	selected, ok := c.Presets[name]
+	if !ok {
+		return Config{}, fmt.Errorf("preset %q is not configured%s", name, describePresets(c.Presets))
+	}
+	allowed, err := selected.allowedModels(c.Models, name)
+	if err != nil {
+		return Config{}, err
+	}
+	resolved := c
+	resolved.Presets = nil
+	resolved.Models = allowed
+	resolved.Listen = selected.Listen
+	if selected.Codex.DefaultModel != "" {
+		resolved.Codex.DefaultModel = selected.Codex.DefaultModel
+	}
+	if selected.Claude.DefaultModel != "" {
+		resolved.Claude.DefaultModel = selected.Claude.DefaultModel
+	}
+	if selected.Claude.SubagentModel != "" {
+		resolved.Claude.SubagentModel = selected.Claude.SubagentModel
+	}
+	return resolved, nil
+}
+
+// PresetNames returns the configured preset names in sorted order.
+func (c Config) PresetNames() []string {
+	names := make([]string, 0, len(c.Presets))
+	for name := range c.Presets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// SessionTag returns the configured tag for a preset, or empty when the
+// preset is unnamed or sets none.
+func (c Config) SessionTag(preset string) string {
+	if selected, ok := c.Presets[strings.TrimSpace(preset)]; ok {
+		return selected.SessionTag
+	}
+	return ""
+}
+
+func describePresets(presets map[string]PresetConfig) string {
+	if len(presets) == 0 {
+		return "; this configuration defines no presets"
+	}
+	names := make([]string, 0, len(presets))
+	for name := range presets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return "; configured presets: " + strings.Join(names, ", ")
 }
 
 func finite(value float64) bool {

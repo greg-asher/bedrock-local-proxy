@@ -47,6 +47,7 @@ type requestRecord struct {
 	Timestamp                      string   `json:"timestamp"`
 	SessionID                      string   `json:"session_id,omitempty"`
 	SessionTag                     string   `json:"session_tag,omitempty"`
+	Preset                         string   `json:"preset,omitempty"`
 	Endpoint                       string   `json:"endpoint"`
 	LocalModel                     string   `json:"local_model,omitempty"`
 	UpstreamModel                  string   `json:"upstream_model,omitempty"`
@@ -80,6 +81,7 @@ type summaryRecord struct {
 	Event                        string  `json:"event"`
 	SessionID                    string  `json:"session_id,omitempty"`
 	SessionTag                   string  `json:"session_tag,omitempty"`
+	Preset                       string  `json:"preset,omitempty"`
 	StartedAt                    string  `json:"started_at,omitempty"`
 	FinishedAt                   string  `json:"finished_at,omitempty"`
 	Status                       string  `json:"status,omitempty"`

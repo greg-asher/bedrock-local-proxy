@@ -445,6 +445,9 @@ func TestMain(m *testing.M) {
 	if sessionTag := os.Getenv("BEDROCK_PROXY_SESSION_TAG"); sessionTag != "" {
 		args = append(args, "--session-tag", sessionTag)
 	}
+	if preset := os.Getenv("BEDROCK_PROXY_PRESET"); preset != "" {
+		args = append(args, "--preset", preset)
+	}
 	os.Exit(run(args, os.Stdout, os.Stderr))
 }
 

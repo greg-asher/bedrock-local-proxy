@@ -20,8 +20,14 @@ const schemaVersion = 1
 type Options struct {
 	Directory   string
 	Start, Stop time.Time
-	Models      map[string]config.ModelConfig
-	Reprice     bool
+	// Models is the full catalog used to price recorded requests. It must
+	// not be narrowed by a preset: pricing a historical request against a
+	// preset's subset would silently report its cost as unavailable.
+	Models map[string]config.ModelConfig
+	// Preset limits the report to requests recorded under that preset.
+	// Empty includes every session.
+	Preset  string
+	Reprice bool
 }
 type Report struct {
 	GeneratedAt       string             `json:"generated_at"`
@@ -35,6 +41,8 @@ type Report struct {
 	Models            []Breakdown        `json:"models"`
 	Endpoints         []Breakdown        `json:"endpoints"`
 	SessionTags       []Breakdown        `json:"session_tags"`
+	Presets           []Breakdown        `json:"presets"`
+	Preset            string             `json:"preset,omitempty"`
 	FailureBreakdowns []FailureBreakdown `json:"failure_breakdowns"`
 	UsageWarnings     []UsageWarning     `json:"usage_warnings"`
 	PricingSource     string             `json:"pricing_source"`
@@ -117,6 +125,7 @@ type event struct {
 	Event                          string   `json:"event"`
 	Timestamp                      string   `json:"timestamp"`
 	SessionTag                     string   `json:"session_tag"`
+	Preset                         string   `json:"preset"`
 	Endpoint                       string   `json:"endpoint"`
 	LocalModel                     string   `json:"local_model"`
 	UpstreamModel                  string   `json:"upstream_model"`
@@ -161,7 +170,7 @@ func Generate(o Options) (Report, error) {
 	if o.Reprice {
 		source = "current configuration (strict repricing)"
 	}
-	r := Report{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), ReportDirectory: dir, Start: o.Start.UTC().Format(time.RFC3339Nano), Stop: o.Stop.UTC().Format(time.RFC3339Nano), PricingSource: source}
+	r := Report{GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), ReportDirectory: dir, Start: o.Start.UTC().Format(time.RFC3339Nano), Stop: o.Stop.UTC().Format(time.RFC3339Nano), PricingSource: source, Preset: o.Preset}
 	entries, err := os.ReadDir(dir)
 	if os.IsNotExist(err) {
 		return r, nil
@@ -172,6 +181,7 @@ func Generate(o Options) (Report, error) {
 	models := map[string]*Breakdown{}
 	endpoints := map[string]*Breakdown{}
 	tags := map[string]*Breakdown{}
+	presets := map[string]*Breakdown{}
 	points := map[time.Time]*Point{}
 	failures := map[string]*FailureBreakdown{}
 	warnings := map[string]int{}
@@ -192,6 +202,9 @@ func Generate(o Options) (Report, error) {
 		}
 		for _, x := range events {
 			if x.Event != "request" {
+				continue
+			}
+			if o.Preset != "" && x.Preset != o.Preset {
 				continue
 			}
 			at, e := time.Parse(time.RFC3339Nano, x.Timestamp)
@@ -221,6 +234,7 @@ func Generate(o Options) (Report, error) {
 			}
 			applyBreakdown(endpoints, label(x.Endpoint, "unknown endpoint"), x)
 			applyBreakdown(tags, label(x.SessionTag, "untagged"), x)
+			applyBreakdown(presets, label(x.Preset, "no preset"), x)
 			if x.Outcome != "success" {
 				cat := x.FailureCategory
 				if cat == "" {
@@ -254,6 +268,7 @@ func Generate(o Options) (Report, error) {
 	r.Models = orderedBreakdowns(models)
 	r.Endpoints = orderedBreakdowns(endpoints)
 	r.SessionTags = orderedBreakdowns(tags)
+	r.Presets = orderedBreakdowns(presets)
 	r.FailureBreakdowns = orderedFailures(failures)
 	r.UsageWarnings = orderedWarnings(warnings)
 	r.PricingIssues = orderedIssues(issues)

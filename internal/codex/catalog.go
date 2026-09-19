@@ -45,6 +45,7 @@ type GenerateOptions struct {
 	ConfigPath   string
 	ModelAlias   string
 	CatalogPath  string
+	Preset       string
 	ProxyVersion string
 	CodexCommand string
 	Runner       CommandRunner
@@ -54,6 +55,7 @@ type GenerateResult struct {
 	CatalogPath        string
 	ModelAlias         string
 	ModelAliases       []string
+	ProfileName        string
 	SkippedModels      []SkippedModel
 	CodexVersion       string
 	BundledCatalogHash string
@@ -248,7 +250,7 @@ func Generate(ctx context.Context, options GenerateOptions) (GenerateResult, err
 			Models:             modelMetadata,
 		},
 	}
-	catalogPath, err := resolveCatalogPath(options.ConfigPath, options.CatalogPath)
+	catalogPath, err := resolveCatalogPath(options.ConfigPath, options.Preset, options.CatalogPath)
 	if err != nil {
 		return GenerateResult{}, err
 	}
@@ -276,6 +278,7 @@ func Generate(ctx context.Context, options GenerateOptions) (GenerateResult, err
 		MetadataRevision:   capabilities.MetadataRevision,
 		CatalogHash:        catalogHash,
 		Warnings:           append([]string(nil), warnings...),
+		ProfileName:        ProfileName(options.Preset),
 		TOML:               ProfileTOML(alias, catalogPath, options.Config.Listen, catalogHash),
 	}, nil
 }
@@ -307,7 +310,20 @@ func ProfileTOML(alias, catalogPath, listen, catalogHash string) string {
 		strconv.Quote(alias), ProviderID, strconv.Quote(catalogPath), "disabled", ProviderID, "Bedrock Local Proxy", baseURL, "responses", "Bearer local", catalogHash)
 }
 
-func DefaultCatalogPath(configPath string) (string, error) {
+// ProfileName returns the Codex profile name for a preset. Codex layers
+// $CODEX_HOME/<name>.config.toml over the base config, so the profile name is
+// the per-preset unit of isolation. The provider id inside the file stays
+// constant because only one overlay is ever active per invocation.
+func ProfileName(preset string) string {
+	if preset = strings.TrimSpace(preset); preset != "" {
+		return DefaultProfileName + "-" + preset
+	}
+	return DefaultProfileName
+}
+
+// DefaultCatalogPath places a preset's catalog under clients/<preset>/codex so
+// that presets running at the same time cannot overwrite each other.
+func DefaultCatalogPath(configPath, preset string) (string, error) {
 	path := strings.TrimSpace(configPath)
 	if path == "" {
 		var err error
@@ -319,6 +335,9 @@ func DefaultCatalogPath(configPath string) (string, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return "", fmt.Errorf("resolve config path: %w", err)
+	}
+	if preset = strings.TrimSpace(preset); preset != "" {
+		return filepath.Join(filepath.Dir(absolute), "clients", preset, "codex", "models.json"), nil
 	}
 	return filepath.Join(filepath.Dir(absolute), "clients", "codex", "models.json"), nil
 }
@@ -590,9 +609,9 @@ func sortedModelNames(models map[string]config.ModelConfig) []string {
 	return names
 }
 
-func resolveCatalogPath(configPath, override string) (string, error) {
+func resolveCatalogPath(configPath, preset, override string) (string, error) {
 	if strings.TrimSpace(override) == "" {
-		return DefaultCatalogPath(configPath)
+		return DefaultCatalogPath(configPath, preset)
 	}
 	path, err := filepath.Abs(override)
 	if err != nil {
