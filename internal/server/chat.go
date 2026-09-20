@@ -110,6 +110,9 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if s.refuseUnpricedModel(w, r, started, localModel) {
+		return
+	}
 	if s.transport == nil {
 		status := http.StatusBadGateway
 		s.writeOpenAIError(w, status, "AWS transport is not configured", "upstream_error")

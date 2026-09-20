@@ -375,3 +375,65 @@ func TestRecorderReceivesMixedRealEndpointOutcomes(t *testing.T) {
 		t.Fatalf("mixed summary = %+v", summary)
 	}
 }
+
+func TestEstimatedCostAccumulatesOnlyPricedRequests(t *testing.T) {
+	inPrice, outPrice := 2.0, 3.0
+	recorder := New(io.Discard, FormatJSON, map[string]config.ModelConfig{
+		"coding": {InputPerMillion: &inPrice, OutputPerMillion: &outPrice},
+	})
+	if got := recorder.BudgetSpend(); got.Estimated != 0 || got.Uncounted != 0 {
+		t.Fatalf("initial spend = %+v, want zero", got)
+	}
+	inTokens, outTokens, status := int64(1_000_000), int64(1_000_000), 200
+	recorder.Record(server.CompletionResult{
+		Endpoint: "/v1/messages", LocalModel: "coding", HTTPStatus: &status, Outcome: server.CompletionSucceeded,
+		InputTokens: &inTokens, OutputTokens: &outTokens,
+	})
+	// An unpriced alias contributes nothing, keeping the total a lower bound.
+	recorder.Record(server.CompletionResult{
+		Endpoint: "/v1/messages", LocalModel: "unknown", HTTPStatus: &status, Outcome: server.CompletionSucceeded,
+		InputTokens: &inTokens, OutputTokens: &outTokens,
+	})
+	got := recorder.BudgetSpend()
+	if math.Abs(got.Estimated-5.0) > 1e-9 {
+		t.Fatalf("estimated cost = %v, want 5", got.Estimated)
+	}
+	if got.Uncounted != 1 {
+		t.Fatalf("uncounted successes = %d, want 1", got.Uncounted)
+	}
+}
+
+func TestBudgetSpendExcludesAbsentUsageAndFailures(t *testing.T) {
+	inPrice, outPrice := 2.0, 3.0
+	recorder := New(io.Discard, FormatJSON, map[string]config.ModelConfig{
+		"coding": {InputPerMillion: &inPrice, OutputPerMillion: &outPrice},
+	})
+	status := 200
+	// A success the client never asked usage for is not a fixable price gap,
+	// so it must not fail the session closed.
+	recorder.Record(server.CompletionResult{
+		Endpoint: "/v1/chat/completions", LocalModel: "coding", HTTPStatus: &status, Outcome: server.CompletionSucceeded,
+	})
+	failed := 401
+	recorder.Record(server.CompletionResult{
+		Endpoint: "/v1/messages", LocalModel: "coding", HTTPStatus: &failed, Outcome: server.CompletionFailed,
+	})
+	if got := recorder.BudgetSpend(); got.Uncounted != 0 {
+		t.Fatalf("uncounted successes = %d, want 0", got.Uncounted)
+	}
+}
+
+func TestBudgetSpendCountsMissingCachePricesAsUncounted(t *testing.T) {
+	inPrice, outPrice := 2.0, 3.0
+	recorder := New(io.Discard, FormatJSON, map[string]config.ModelConfig{
+		"coding": {BedrockModelID: "us.anthropic.claude-test-v1:0", InputPerMillion: &inPrice, OutputPerMillion: &outPrice},
+	})
+	inTokens, outTokens, cacheRead, status := int64(100), int64(10), int64(50), 200
+	recorder.Record(server.CompletionResult{
+		Endpoint: "/v1/messages", LocalModel: "coding", HTTPStatus: &status, Outcome: server.CompletionSucceeded,
+		InputTokens: &inTokens, OutputTokens: &outTokens, CacheReadInputTokens: &cacheRead,
+	})
+	if got := recorder.BudgetSpend(); got.Uncounted != 1 {
+		t.Fatalf("uncounted successes = %d, want 1", got.Uncounted)
+	}
+}

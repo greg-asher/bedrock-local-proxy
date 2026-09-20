@@ -7,11 +7,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +22,7 @@ import (
 	"github.com/gregasher/bedrock-local-proxy/internal/claude"
 	"github.com/gregasher/bedrock-local-proxy/internal/codex"
 	"github.com/gregasher/bedrock-local-proxy/internal/config"
+	"github.com/gregasher/bedrock-local-proxy/internal/console"
 	"github.com/gregasher/bedrock-local-proxy/internal/doctor"
 	"github.com/gregasher/bedrock-local-proxy/internal/reports"
 	"github.com/gregasher/bedrock-local-proxy/internal/server"
@@ -40,6 +43,7 @@ type record struct {
 	ReportPath string   `json:"report_path,omitempty"`
 	SessionTag string   `json:"session_tag,omitempty"`
 	Preset     string   `json:"preset,omitempty"`
+	Budget     *float64 `json:"budget,omitempty"`
 }
 
 type singleValue struct {
@@ -56,6 +60,37 @@ func (v *singleValue) Set(value string) error {
 	}
 	v.set = true
 	v.value = value
+	return nil
+}
+
+// budgetValue parses --budget as an amount in the currency of the configured
+// model prices. It rejects a repeated flag for the same reason singleValue
+// does: two ceilings in one command line are ambiguous.
+type budgetValue struct {
+	set   bool
+	value float64
+}
+
+func (v *budgetValue) String() string {
+	if !v.set {
+		return ""
+	}
+	return strconv.FormatFloat(v.value, 'f', -1, 64)
+}
+
+func (v *budgetValue) Set(value string) error {
+	if v.set {
+		return errors.New("--budget may only be provided once")
+	}
+	amount, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(value), "$")), 64)
+	if err != nil {
+		return fmt.Errorf("--budget must be an amount such as 2.50")
+	}
+	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 {
+		return errors.New("--budget must be greater than zero")
+	}
+	v.set = true
+	v.value = amount
 	return nil
 }
 
@@ -328,6 +363,9 @@ func runProxy(args []string, stdout, stderr io.Writer) int {
 	var preset singleValue
 	preset.name = "preset"
 	flags.Var(&preset, "preset", "named preset from the configuration's presets block")
+	var budget budgetValue
+	flags.Var(&budget, "budget", "refuse generation requests once this run's estimated cost reaches this amount")
+	colorFlag := flags.String("color", "auto", "colorize text output: auto, always, or never")
 	showVersion := flags.Bool("version", false, "print version and exit")
 	if err := flags.Parse(args); err != nil {
 		diagnostic(stderr, requestedLogFormat(args), err)
@@ -335,6 +373,11 @@ func runProxy(args []string, stdout, stderr io.Writer) int {
 	}
 	if *logFormat != "text" && *logFormat != "json" {
 		diagnostic(stderr, *logFormat, errors.New("--log-format must be text or json"))
+		return 2
+	}
+	colorMode, err := console.ParseColorMode(*colorFlag)
+	if err != nil {
+		diagnostic(stderr, *logFormat, err)
 		return 2
 	}
 	if *showVersion {
@@ -401,9 +444,16 @@ func runProxy(args []string, stdout, stderr io.Writer) int {
 	if *logFormat == "json" {
 		accountingFormat = accounting.FormatJSON
 	}
+	out := console.New(stdout, colorMode)
 	accountingRecorder := accounting.New(stdout, accountingFormat, cfg.Models)
+	if accountingFormat == accounting.FormatText {
+		accountingRecorder.SetConsole(out)
+	}
 	accountingRecorder.SetSessionReporter(sessionReporter)
 	srv.SetCompletionRecorder(accountingRecorder.Record)
+	if budget.set {
+		srv.SetBudget(budget.value, accountingRecorder.BudgetSpend)
+	}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sig)
@@ -413,12 +463,24 @@ func runProxy(args []string, stdout, stderr io.Writer) int {
 		diagnostic(stderr, *logFormat, fmt.Errorf("start session report: %w", err))
 		return 1
 	}
-	if err := startup(stdout, *logFormat, cfg, ln.Addr().String(), sessionReporter.Info()); err != nil {
+	budgetLimit := (*float64)(nil)
+	if budget.set {
+		budgetLimit = &budget.value
+	}
+	if err := startup(stdout, out, *logFormat, cfg, ln.Addr().String(), sessionReporter.Info(), budgetLimit); err != nil {
 		_ = ln.Close()
 		diagnostic(stderr, *logFormat, err)
 		return 1
 	}
-	defer accountingRecorder.WriteSummary()
+	if accountingFormat == accounting.FormatText {
+		out.StartStatus(accountingRecorder.Status)
+	}
+	// The footer is torn down before the summary so the closing block is the
+	// last thing left on screen.
+	defer func() {
+		out.Close()
+		accountingRecorder.WriteSummary()
+	}()
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 	select {
@@ -426,6 +488,9 @@ func runProxy(args []string, stdout, stderr io.Writer) int {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
+			// Tear the footer down first: a diagnostic printed over it would
+			// be erased with it.
+			out.Close()
 			diagnostic(stderr, *logFormat, fmt.Errorf("shutdown: %w", err))
 			sessionStatus = accounting.SessionServerFailed
 			return 1
@@ -433,6 +498,7 @@ func runProxy(args []string, stdout, stderr io.Writer) int {
 		accountingRecorder.MarkIncomplete(srv.PendingCompletions())
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, net.ErrClosed) {
+			out.Close()
 			diagnostic(stderr, *logFormat, err)
 			sessionStatus = accounting.SessionServerFailed
 			return 1
@@ -649,27 +715,26 @@ func requestedLogFormat(args []string) string {
 	return "text"
 }
 
-func startup(stdout io.Writer, format string, cfg config.Config, address string, session accounting.SessionInfo) error {
+func startup(stdout io.Writer, out *console.Console, format string, cfg config.Config, address string, session accounting.SessionInfo, budget *float64) error {
 	names := make([]string, 0, len(cfg.Models))
 	for name := range cfg.Models {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	if format == "json" {
-		return json.NewEncoder(stdout).Encode(record{Event: "startup", Profile: cfg.AWS.Profile, Region: cfg.AWS.Region, Listen: "http://" + address + "/v1", Models: names, ReportPath: session.Directory, SessionTag: session.SessionTag, Preset: session.Preset})
+		return json.NewEncoder(stdout).Encode(record{Event: "startup", Profile: cfg.AWS.Profile, Region: cfg.AWS.Region, Listen: "http://" + address + "/v1", Models: names, ReportPath: session.Directory, SessionTag: session.SessionTag, Preset: session.Preset, Budget: budget})
 	}
-	fmt.Fprintln(stdout, "Bedrock Local Proxy")
-	if session.Preset != "" {
-		fmt.Fprintf(stdout, "Preset:      %s\n", session.Preset)
-	}
-	fmt.Fprintf(stdout, "Listening:   http://%s/v1\n", address)
-	fmt.Fprintf(stdout, "AWS profile: %s\n", cfg.AWS.Profile)
-	fmt.Fprintf(stdout, "Region:      %s\n", cfg.AWS.Region)
-	fmt.Fprintf(stdout, "Models:      %s\n", join(names))
-	fmt.Fprintf(stdout, "Session report: %s\n", session.Directory)
-	if session.SessionTag != "" {
-		fmt.Fprintf(stdout, "Session tag: %s\n", session.SessionTag)
-	}
+	out.Banner(console.Banner{
+		Version:    version,
+		Address:    "http://" + address + "/v1",
+		Tag:        session.SessionTag,
+		Preset:     session.Preset,
+		Profile:    cfg.AWS.Profile,
+		Region:     cfg.AWS.Region,
+		ReportPath: session.Directory,
+		Models:     names,
+		Budget:     budget,
+	})
 	return nil
 }
 

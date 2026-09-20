@@ -29,6 +29,7 @@ type Server struct {
 	nextRequestID      uint64
 	stopping           bool
 	pendingCompletions int
+	budget             *budgetLimit
 }
 
 func New(cfg config.Config) *Server {
@@ -160,6 +161,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.endRequest(requestID)
 	*r = *r.WithContext(requestContext)
+
+	// Only a request the endpoint would actually serve is worth refusing: a
+	// wrong method still deserves its 405 rather than a budget message.
+	if r.Method == http.MethodPost && generationEndpoint(r.URL.Path) && s.refuseExhaustedBudget(w, r, started) {
+		return
+	}
 
 	if r.URL.Path == "/v1/chat/completions" {
 		s.serveChatCompletions(w, r)

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gregasher/bedrock-local-proxy/internal/config"
+	"github.com/gregasher/bedrock-local-proxy/internal/console"
 	"github.com/gregasher/bedrock-local-proxy/internal/pricing"
 	"github.com/gregasher/bedrock-local-proxy/internal/server"
 )
@@ -30,6 +31,7 @@ type totals struct {
 	missingUsageRequests, missingEstimates      int
 	incompleteRequests                          int
 	functionToolCalls, unsupportedRejections    int
+	uncountedSuccesses                          int
 }
 
 type Recorder struct {
@@ -40,6 +42,7 @@ type Recorder struct {
 	started time.Time
 	totals  totals
 	session *SessionReporter
+	out     *console.Console
 }
 
 type requestRecord struct {
@@ -107,7 +110,26 @@ func New(w io.Writer, format Format, models map[string]config.ModelConfig) *Reco
 	for name, model := range models {
 		copyModels[name] = model
 	}
-	return &Recorder{w: w, format: format, models: copyModels, started: time.Now()}
+	recorder := &Recorder{w: w, format: format, models: copyModels, started: time.Now()}
+	if format == FormatText {
+		recorder.out = console.New(w, console.ColorAuto)
+	}
+	return recorder
+}
+
+// SetConsole shares the command's console so request lines print above the
+// live footer instead of overwriting it.
+func (r *Recorder) SetConsole(out *console.Console) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.out = out
+}
+
+// Status reports live totals for the console footer.
+func (r *Recorder) Status() console.Status {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return console.Status{Requests: r.totals.requests, Failures: r.totals.failures, Spent: r.totals.knownEstimatedCost, Uptime: time.Since(r.started)}
 }
 
 // SetSessionReporter attaches the durable, metadata-only sink used for one
@@ -119,13 +141,15 @@ func (r *Recorder) SetSessionReporter(reporter *SessionReporter) {
 }
 
 func (r *Recorder) Record(result server.CompletionResult) {
+	observed := time.Now()
 	input, output := result.InputTokens, result.OutputTokens
-	cost, costOK := r.estimate(result)
+	cost, priceReason := r.estimate(result)
+	costOK := priceReason == ""
 	usageStatus := "known"
 	if input == nil || output == nil {
 		usageStatus = "unknown"
 	}
-	entry := requestRecord{Event: "request", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Endpoint: result.Endpoint,
+	entry := requestRecord{Event: "request", Timestamp: observed.UTC().Format(time.RFC3339Nano), Endpoint: result.Endpoint,
 		LocalModel: result.LocalModel, UpstreamModel: result.UpstreamModel, LatencyMS: float64(result.Elapsed) / float64(time.Millisecond),
 		HTTPStatus: result.HTTPStatus, Outcome: string(result.Outcome), InputTokens: input, OutputTokens: output,
 		CacheReadInputTokens: result.CacheReadInputTokens, CacheWriteInputTokens: result.CacheWriteInputTokens, InputTokensIncludeCache: result.InputTokensIncludeCache,
@@ -153,7 +177,6 @@ func (r *Recorder) Record(result server.CompletionResult) {
 		entry.FailureCategory = defaultFailureCategory(result)
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if !strings.HasPrefix(result.Endpoint, "/v1/models") {
 		r.totals.requests++
 		if result.Outcome == server.CompletionSucceeded {
@@ -178,30 +201,44 @@ func (r *Recorder) Record(result server.CompletionResult) {
 		}
 		if !costOK {
 			r.totals.missingEstimates++
+			// A succeeded request that cannot be priced for a configuration
+			// reason is real spend this session will never account for.
+			// Absent usage is excluded: it is a property of the client's
+			// request, not of a fixable price, and a budget cannot demand it.
+			if result.Outcome == server.CompletionSucceeded && priceReason != pricing.MissingUsage {
+				r.totals.uncountedSuccesses++
+			}
 		} else {
 			r.totals.knownEstimatedCost += cost
 		}
 		r.totals.functionToolCalls += result.FunctionToolCalls
 		r.totals.unsupportedRejections += result.UnsupportedFeatureRejections
 	}
-	if r.session != nil {
-		r.session.RecordRequest(entry)
+	// Every other sink is released from this lock on purpose. The console
+	// footer reads these same totals back through Status, so holding the
+	// recorder lock across a console write would deadlock the proxy.
+	session, out := r.session, r.out
+	r.mu.Unlock()
+	if session != nil {
+		session.RecordRequest(entry)
 	}
 	if r.w != nil {
 		if r.format == FormatJSON {
 			_ = json.NewEncoder(r.w).Encode(entry)
 			return
 		}
-		_, _ = fmt.Fprintf(r.w, "request event=%s timestamp=%s endpoint=%s local_model=%s upstream_model=%s outcome=%s http_status=%s latency_ms=%.2f input_tokens=%s output_tokens=%s cache_read_input_tokens=%s cache_write_input_tokens=%s usage_status=%s estimated_cost=%s cost_status=%s\n", entry.Event, entry.Timestamp, entry.Endpoint, entry.LocalModel, entry.UpstreamModel, entry.Outcome, statusText(entry.HTTPStatus), entry.LatencyMS, tokenText(entry.InputTokens), tokenText(entry.OutputTokens), tokenText(entry.CacheReadInputTokens), tokenText(entry.CacheWriteInputTokens), entry.UsageStatus, costText(entry), entry.CostStatus)
+		if out != nil {
+			out.Print(requestLine(out, entry, observed))
+		}
 	}
 }
 
-func (r *Recorder) estimate(result server.CompletionResult) (float64, bool) {
+func (r *Recorder) estimate(result server.CompletionResult) (float64, pricing.Reason) {
 	model, ok := r.models[result.LocalModel]
 	if !ok {
-		return 0, false
+		return 0, pricing.UnknownModel
 	}
-	cost, reason := pricing.Estimate(model, pricing.Usage{
+	return pricing.Estimate(model, pricing.Usage{
 		InputTokens:                    result.InputTokens,
 		OutputTokens:                   result.OutputTokens,
 		CacheReadInputTokens:           result.CacheReadInputTokens,
@@ -209,7 +246,6 @@ func (r *Recorder) estimate(result server.CompletionResult) (float64, bool) {
 		InputTokensIncludeCache:        result.InputTokensIncludeCache,
 		ObservedUncoveredBillingFields: result.ObservedUncoveredBillingFields,
 	})
-	return cost, reason == ""
 }
 
 func sortedWarnings(values []string) []string {
@@ -246,7 +282,6 @@ func tokenCount(value *int64) int64 {
 
 func (r *Recorder) WriteSummary() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	s := summaryRecord{Event: "summary", RuntimeSeconds: time.Since(r.started).Seconds(), Requests: r.totals.requests, Successes: r.totals.successes, Failures: r.totals.failures,
 		KnownInputTokens: r.totals.knownInputTokens, KnownOutputTokens: r.totals.knownOutputTokens, KnownEstimatedCost: r.totals.knownEstimatedCost,
 		KnownCacheReadInputTokens: r.totals.knownCacheReadTokens, KnownCacheWriteInputTokens: r.totals.knownCacheWriteTokens,
@@ -258,22 +293,33 @@ func (r *Recorder) WriteSummary() {
 	} else if r.totals.requests > r.totals.missingEstimates {
 		s.CostStatus = "partial"
 	}
-	if r.session != nil {
-		r.session.StageSummary(s)
+	session, out := r.session, r.out
+	r.mu.Unlock()
+	if session != nil {
+		session.StageSummary(s)
 	}
 	if r.w != nil {
 		if r.format == FormatJSON {
 			_ = json.NewEncoder(r.w).Encode(s)
 			return
 		}
-		cost := "unavailable"
-		if s.CostStatus == "estimated" {
-			cost = fmt.Sprintf("$%.8f (estimated)", s.KnownEstimatedCost)
-		} else if s.CostStatus == "partial" {
-			cost = fmt.Sprintf("$%.8f (partial estimate)", s.KnownEstimatedCost)
+		if out != nil {
+			out.Summary(console.Metrics{
+				Runtime: time.Duration(s.RuntimeSeconds * float64(time.Second)), Requests: s.Requests, Successes: s.Successes, Failures: s.Failures,
+				InputTokens: s.KnownInputTokens, OutputTokens: s.KnownOutputTokens, CacheReadTokens: s.KnownCacheReadInputTokens, CacheWriteTokens: s.KnownCacheWriteInputTokens,
+				EstimatedCost: s.KnownEstimatedCost, CostStatus: s.CostStatus, MissingUsage: s.MissingUsageRequests, MissingEstimates: s.MissingEstimateRequests, Incomplete: s.IncompleteRequests,
+			})
 		}
-		_, _ = fmt.Fprintf(r.w, "Session summary runtime=%.1fs requests=%d successes=%d failures=%d known_input_tokens=%d known_output_tokens=%d known_cache_read_input_tokens=%d known_cache_write_input_tokens=%d estimated_cost=%s missing_usage=%d missing_estimates=%d incomplete_requests=%d\n", s.RuntimeSeconds, s.Requests, s.Successes, s.Failures, s.KnownInputTokens, s.KnownOutputTokens, s.KnownCacheReadInputTokens, s.KnownCacheWriteInputTokens, cost, s.MissingUsageRequests, s.MissingEstimateRequests, s.IncompleteRequests)
 	}
+}
+
+// BudgetSpend reports what a spend ceiling is enforced against: the
+// accumulated estimated cost, and the number of successful requests whose
+// cost this session could not account for at all.
+func (r *Recorder) BudgetSpend() server.BudgetSpend {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return server.BudgetSpend{Estimated: r.totals.knownEstimatedCost, Uncounted: r.totals.uncountedSuccesses}
 }
 
 // MarkIncomplete records active handlers that did not publish a completion
@@ -288,22 +334,81 @@ func (r *Recorder) MarkIncomplete(count int) {
 	r.mu.Unlock()
 }
 
-func statusText(status *int) string {
-	if status == nil {
-		return "unavailable"
+// requestLine renders one completion as a fixed-column row. Fields that carry
+// no information are omitted rather than printed as "unavailable"; the
+// complete record is always in the session report and in --log-format json.
+func requestLine(out *console.Console, entry requestRecord, observed time.Time) string {
+	succeeded := entry.Outcome == string(server.CompletionSucceeded)
+	route := strings.TrimPrefix(entry.Endpoint, "/v1/")
+	if index := strings.Index(route, "/"); index >= 0 {
+		route = route[:index]
 	}
-	return fmt.Sprintf("%d", *status)
-}
-func costText(entry requestRecord) string {
-	if entry.EstimatedCost == nil {
-		return "unavailable"
+	columns := []string{
+		out.Style(observed.Format("15:04:05"), console.Dim),
+		out.Glyph(succeeded),
+		padCell(route, 10),
+		out.Style(padCell(entry.LocalModel, 12), console.Cyan),
+		padLeft(console.Duration(time.Duration(entry.LatencyMS*float64(time.Millisecond))), 7),
 	}
-	return fmt.Sprintf("$%.8f (estimated)", *entry.EstimatedCost)
+	if entry.InputTokens != nil || entry.OutputTokens != nil {
+		columns = append(columns, padCell("in "+console.Tokens(deref(entry.InputTokens)), 11), padCell("out "+console.Tokens(deref(entry.OutputTokens)), 11))
+	} else {
+		columns = append(columns, padCell("", 11), padCell("", 11))
+	}
+	if cache := deref(entry.CacheReadInputTokens) + deref(entry.CacheWriteInputTokens); cache > 0 {
+		columns = append(columns, out.Style(padCell("cache "+console.Tokens(cache), 12), console.Dim))
+	}
+	if entry.EstimatedCost != nil {
+		columns = append(columns, out.Style(console.Money(*entry.EstimatedCost), console.Yellow))
+	}
+	if !succeeded {
+		detail := entry.FailureCategory
+		if entry.HTTPStatus != nil {
+			detail = fmt.Sprintf("%d %s", *entry.HTTPStatus, detail)
+		}
+		columns = append(columns, out.Style(strings.TrimSpace(detail), console.Red))
+	}
+	line := strings.TrimRight(strings.Join(columns, " "), " ")
+	// A discovery call is excluded from session totals, so it is dimmed to
+	// keep generation traffic the thing that stands out.
+	if strings.HasPrefix(entry.Endpoint, "/v1/models") {
+		return out.Style(stripStyles(line), console.Dim)
+	}
+	return line
 }
 
-func tokenText(value *int64) string {
-	if value == nil {
-		return "unavailable"
+func stripStyles(line string) string {
+	for {
+		start := strings.Index(line, "\x1b[")
+		if start < 0 {
+			return line
+		}
+		end := strings.Index(line[start:], "m")
+		if end < 0 {
+			return line
+		}
+		line = line[:start] + line[start+end+1:]
 	}
-	return fmt.Sprintf("%d", *value)
+}
+
+func deref(value *int64) int64 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func padCell(value string, width int) string {
+	runes := []rune(value)
+	if len(runes) > width {
+		return string(runes[:width-1]) + "…"
+	}
+	return value + strings.Repeat(" ", width-len(runes))
+}
+
+func padLeft(value string, width int) string {
+	if len([]rune(value)) >= width {
+		return value
+	}
+	return strings.Repeat(" ", width-len([]rune(value))) + value
 }

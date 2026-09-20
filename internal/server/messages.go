@@ -51,6 +51,9 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 		s.finishCompletion(started, result)
 		return
 	}
+	if s.refuseUnpricedModel(w, r, started, localModel) {
+		return
+	}
 	if s.transport == nil {
 		status := http.StatusBadGateway
 		s.writeAnthropicError(w, status, "AWS transport is not configured", "api_error")

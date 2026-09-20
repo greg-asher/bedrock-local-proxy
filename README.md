@@ -175,6 +175,9 @@ The process accepts these command-line options:
 --log-format json   one JSON object per log line
 --report-dir PATH   parent directory for one run's session report
 --session-tag NAME  optional ingestion tag for one run
+--budget AMOUNT     stop proxying once this run's estimated cost reaches AMOUNT;
+                    also refuses models whose cost cannot be counted
+--color MODE        colorize text output: auto (default), always, or never
 --version           print the installed version and exit
 ```
 
@@ -183,6 +186,42 @@ For example:
 ```sh
 bedrock-proxy --config ./config.yaml --log-format json --session-tag nightly-ingest
 ```
+
+`--budget` caps one run's spend. The amount is in the same currency as the configured `models.<alias>.input_per_million` and `output_per_million` prices, so it is USD for the published Bedrock rates, and it accepts either `2.50` or `$2.50`. The proxy sums the estimated cost of every completed request and refuses new generation requests on `/v1/chat/completions`, `/v1/responses`, and `/v1/messages` once that total reaches the budget, answering `402 Payment Required` in the client's own error shape instead of calling Bedrock. `/v1/models` stays available so a client can still list aliases. The ceiling holds for one run only: it is not persisted, and restarting the proxy starts a fresh total.
+
+A budget only means something if every request can be counted against it, so `--budget` also refuses spend it cannot price:
+
+- A request naming an alias without `input_per_million` and `output_per_million` is refused with `402` before it reaches Bedrock, naming the missing price. The same alias is proxied normally when no budget is set, so this restriction costs nothing to runs that do not use one.
+- If a request nevertheless completes without a usable cost, because the alias lacks the cache prices its response needed or the response carried a billing dimension the proxy does not price, spend has already escaped the total. The proxy then refuses all further generation requests for the run rather than continuing against a ceiling it can no longer enforce. Adding the missing prices and restarting clears it.
+
+One gap remains open by design. A successful response that reports no usage at all cannot be priced, and the proxy still allows the run to continue, because usage reporting is a property of the client's request rather than a price you can configure: an OpenAI-style streaming client that does not send `stream_options.include_usage` would otherwise stop the proxy on its first request. Such requests contribute nothing to the total, so the accumulated figure is a lower bound on real spend.
+
+The cap is also enforced against *estimated* cost, so it is only as accurate as the prices in the configuration, and requests already in flight when the budget is reached are allowed to finish, so the final total can exceed the budget by their cost. Treat `--budget` as a guardrail against runaway loops, not as a billing control.
+
+### Terminal output
+
+`--log-format text` renders for a human. On an interactive terminal the run opens with a framed banner, streams one aligned line per request, and pins a status bar to the bottom of the window:
+
+```text
+╭─ Bedrock Local Proxy ──────────────────────────────────────────── v0.4.1 ─╮
+│  http://127.0.0.1:8787/v1                                                 │
+│  tag nightly-ingest   preset cheap   budget $5.00                         │
+╰───────────────────────────────────────────────────────────────────────────╯
+  aws      acme-dev · us-east-2
+  models   coding, fast
+  report   ~/.local/state/bedrock-proxy/sessions/20260920T143249Z-9567-9ae8b4bb
+
+14:13:49  ✓  messages   coding          1.2s  in 1.2k     out 340     $0.0048
+14:13:51  ✓  responses  fast           840ms  in 98k      out 1.2k    cache 12k   $0.3100
+14:13:54  ✗  chat       coding         120ms                          429 upstream_http
+ nightly-ingest · :8787 · 42 req · 1 failed · $3.14 · ███████░░░░░ · 63% · $1.86 left · 4m 12s
+```
+
+The status bar refreshes every second and is redrawn above each new log line, so the session tag, port, and remaining budget stay visible without scrolling back. It drops its lowest-value fields on a narrow terminal rather than wrapping, and the closing summary replaces it when the proxy stops.
+
+Only an interactive terminal gets colors, frames, and the status bar. When output is redirected or piped, the same run prints plain aligned text with no escape sequences, and the budget is announced at 50%, 75%, 90%, and 100% instead of through a bar that a log file could not show. `--color never` (or the `NO_COLOR` environment variable) also turns styling off on a terminal, and `--color always` keeps it through a pager such as `less -R`. Terminal width comes from the window itself and is re-measured as the run continues, so resizing reflows the output.
+
+The console is a summary, not the record: a request line omits fields that carry no information, and the complete per-request metadata always remains in `--log-format json` and in the session report's `events.jsonl`. `--log-format json` output is unchanged and remains one object per line for machine consumption.
 
 There are no configuration environment variables. `XDG_STATE_HOME` only selects the default report parent; use `--config` when a separate configuration file is needed.
 

@@ -32,6 +32,7 @@ type Reason string
 const (
 	UncoveredBilling       Reason = "response contains an unsupported nonzero billing dimension"
 	MissingUsage           Reason = "missing input or output token usage"
+	UnknownModel           Reason = "model alias is not configured"
 	MissingInputPrice      Reason = "input_per_million is missing"
 	MissingOutputPrice     Reason = "output_per_million is missing"
 	MissingCacheReadPrice  Reason = "cache_read_input_per_million is missing for nonzero cache reads"
@@ -48,6 +49,20 @@ type Usage struct {
 	CacheWriteInputTokens          *int64
 	InputTokensIncludeCache        bool
 	ObservedUncoveredBillingFields bool
+}
+
+// Configured reports whether a model carries the rates every request needs,
+// independent of any one usage record. Cache rates are deliberately excluded:
+// they are required only when a response actually reports cache tokens, and
+// demanding them up front would reject models that never cache.
+func Configured(model config.ModelConfig) Reason {
+	if model.InputPerMillion == nil {
+		return MissingInputPrice
+	}
+	if model.OutputPerMillion == nil {
+		return MissingOutputPrice
+	}
+	return ""
 }
 
 // Estimate returns the estimated cost and an empty reason, or a stable reason

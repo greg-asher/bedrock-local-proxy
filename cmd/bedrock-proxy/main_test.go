@@ -17,6 +17,7 @@ import (
 	"github.com/gregasher/bedrock-local-proxy/internal/accounting"
 	"github.com/gregasher/bedrock-local-proxy/internal/codex"
 	"github.com/gregasher/bedrock-local-proxy/internal/config"
+	"github.com/gregasher/bedrock-local-proxy/internal/console"
 	"github.com/gregasher/bedrock-local-proxy/internal/reports"
 )
 
@@ -203,10 +204,10 @@ func TestStartupJSONIsMachineReadable(t *testing.T) {
 func TestStartupTextShowsSessionReportAndTag(t *testing.T) {
 	var output bytes.Buffer
 	cfg := config.Config{AWS: config.AWSConfig{Profile: "YOUR_AWS_PROFILE", Region: "us-east-2"}, Models: map[string]config.ModelConfig{"coding": {BedrockModelID: "model-a"}}}
-	if err := startup(&output, "text", cfg, "127.0.0.1:8787", accounting.SessionInfo{Directory: "/tmp/report", SessionTag: "ingest"}); err != nil {
+	if err := startup(&output, console.New(&output, console.ColorNever), "text", cfg, "127.0.0.1:8787", accounting.SessionInfo{Directory: "/tmp/report", SessionTag: "ingest"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "Session report: /tmp/report") || !strings.Contains(output.String(), "Session tag: ingest") {
+	if !strings.Contains(output.String(), "/tmp/report") || !strings.Contains(output.String(), "ingest") {
 		t.Fatalf("startup text = %q", output.String())
 	}
 }
@@ -220,6 +221,42 @@ func TestRunRejectsDuplicateOrInvalidSessionTag(t *testing.T) {
 		if code := run(args, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "session-tag") {
 			t.Fatalf("run(%q) code=%d stderr=%q", args, code, errOut.String())
 		}
+	}
+}
+
+func TestStartupTextShowsBudgetWhenSet(t *testing.T) {
+	var output bytes.Buffer
+	cfg := config.Config{AWS: config.AWSConfig{Profile: "YOUR_AWS_PROFILE", Region: "us-east-2"}, Models: map[string]config.ModelConfig{"coding": {BedrockModelID: "model-a"}}}
+	budget := 2.5
+	if err := startup(&output, console.New(&output, console.ColorNever), "text", cfg, "127.0.0.1:8787", accounting.SessionInfo{Directory: "/tmp/report"}, &budget); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "budget $2.50") {
+		t.Fatalf("startup text = %q", output.String())
+	}
+}
+
+func TestRunRejectsInvalidBudget(t *testing.T) {
+	for _, args := range [][]string{
+		{"--budget", "1", "--budget", "2"},
+		{"--budget", "0"},
+		{"--budget", "-1"},
+		{"--budget", "free"},
+	} {
+		var out, errOut bytes.Buffer
+		if code := run(args, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "budget") {
+			t.Fatalf("run(%q) code=%d stderr=%q", args, code, errOut.String())
+		}
+	}
+}
+
+func TestBudgetValueAcceptsCurrencyPrefixedAmount(t *testing.T) {
+	var budget budgetValue
+	if err := budget.Set(" $2.50 "); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if !budget.set || budget.value != 2.5 {
+		t.Fatalf("budget = %+v, want 2.5", budget)
 	}
 }
 
@@ -493,7 +530,7 @@ func startHelperWith(t *testing.T, path, format string) (*exec.Cmd, *bufio.Reade
 			cmd.Process.Kill()
 			t.Fatal(err)
 		}
-		if strings.Contains(line, "Listening:") {
+		if strings.Contains(line, "http://127.0.0.1:") {
 			listening = line
 			break
 		}
