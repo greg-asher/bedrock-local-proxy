@@ -171,6 +171,8 @@ The process accepts these command-line options:
 
 ```text
 --config PATH       load a different YAML file
+--preset NAME       run a named preset from the configuration's presets block
+--listen HOST:PORT  loopback address to bind, overriding the configured listen
 --log-format text   human-readable startup, request, and summary logs (default)
 --log-format json   one JSON object per log line
 --report-dir PATH   parent directory for one run's session report
@@ -186,6 +188,8 @@ For example:
 ```sh
 bedrock-proxy --config ./config.yaml --log-format json --session-tag nightly-ingest
 ```
+
+`--listen` binds one run to an address of your choosing instead of the one the configuration resolved to. It overrides both the top-level `listen` and a preset's own `listen`, so `--preset cheap --listen 127.0.0.1:9001` runs that preset off its configured port without editing the file. The address must be loopback, in the same `host:port` form the configuration uses; `preset create --listen` accepts the same form. Because a run binds a single address, the port-uniqueness rule between presets does not apply to the overriding value, and pointing two simultaneous runs at one address fails at bind time like any other occupied port.
 
 `--budget` caps one run's spend. The amount is in the same currency as the configured `models.<alias>.input_per_million` and `output_per_million` prices, so it is USD for the published Bedrock rates, and it accepts either `2.50` or `$2.50`. The proxy sums the estimated cost of every completed request and refuses new generation requests on `/v1/chat/completions`, `/v1/responses`, and `/v1/messages` once that total reaches the budget, answering `402 Payment Required` in the client's own error shape instead of calling Bedrock. `/v1/models` stays available so a client can still list aliases. The ceiling holds for one run only: it is not persisted, and restarting the proxy starts a fresh total.
 
@@ -219,7 +223,7 @@ The cap is also enforced against *estimated* cost, so it is only as accurate as 
 
 The status bar refreshes every second and is redrawn above each new log line, so the session tag, port, and remaining budget stay visible without scrolling back. It drops its lowest-value fields on a narrow terminal rather than wrapping, and the closing summary replaces it when the proxy stops.
 
-Only an interactive terminal gets colors, frames, and the status bar. When output is redirected or piped, the same run prints plain aligned text with no escape sequences, and the budget is announced at 50%, 75%, 90%, and 100% instead of through a bar that a log file could not show. `--color never` (or the `NO_COLOR` environment variable) also turns styling off on a terminal, and `--color always` keeps it through a pager such as `less -R`. Terminal width comes from the window itself and is re-measured as the run continues, so resizing reflows the output.
+Only an interactive terminal gets colors, frames, and the status bar. When output is redirected or piped, the same run prints plain aligned text with no escape sequences, and the budget is announced at 50%, 75%, 90%, and 100% instead of through a bar that a log file could not show. `--color never` (or the `NO_COLOR` environment variable) also turns styling off on a terminal, and `--color always` keeps it through a pager such as `less -R`. Terminal width comes from the window itself and is re-measured as the run continues. Request rows work from 40 columns upward, adding the timestamp, cost, token counts, and cache usage as space becomes available; redirected logs keep every field.
 
 The console is a summary, not the record: a request line omits fields that carry no information, and the complete per-request metadata always remains in `--log-format json` and in the session report's `events.jsonl`. `--log-format json` output is unchanged and remains one object per line for machine consumption.
 

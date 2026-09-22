@@ -26,6 +26,16 @@ if ! command -v go >/dev/null 2>&1; then
 fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Stamp the build so --version identifies what is installed. A checkout
+# without git, or an export with no history, keeps the compiled-in default.
+# The -dirty suffix marks a binary built from an uncommitted working tree.
+build_version=dev
+if command -v git >/dev/null 2>&1; then
+	described=$(cd "$script_dir" && git describe --tags --always --dirty 2>/dev/null) || described=
+	if [ -n "$described" ]; then
+		build_version=$described
+	fi
+fi
 bin_dir=${HOME:?HOME must be set}/.local/bin
 config_dir=${HOME:?HOME must be set}/.config/bedrock-proxy
 config_path=$config_dir/config.yaml
@@ -92,7 +102,7 @@ mkdir -p "$bin_dir"
 tmp_binary=$(mktemp "$bin_dir/.bedrock-proxy.XXXXXX")
 
 printf '%s\n' "Building bedrock-proxy for $(GOCACHE="$go_build_cache" GOMODCACHE="$go_module_cache" go env GOOS)/$(GOCACHE="$go_build_cache" GOMODCACHE="$go_module_cache" go env GOARCH)..."
-if ! (cd "$script_dir" && GOCACHE="$go_build_cache" GOMODCACHE="$go_module_cache" go build -o "$tmp_binary" ./cmd/bedrock-proxy); then
+if ! (cd "$script_dir" && GOCACHE="$go_build_cache" GOMODCACHE="$go_module_cache" go build -ldflags "-X main.version=$build_version" -o "$tmp_binary" ./cmd/bedrock-proxy); then
 	printf '%s\n' "install.sh: build failed; existing installation was left unchanged" >&2
 	exit 1
 fi

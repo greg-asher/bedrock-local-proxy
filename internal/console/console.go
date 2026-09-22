@@ -152,6 +152,18 @@ func (c *Console) refreshWidth() {
 // redirected logs remain greppable.
 func (c *Console) Rich() bool { return c.rich }
 
+// Width returns the current terminal width. Plain output returns zero because
+// redirected logs should keep every field instead of adapting to a terminal.
+func (c *Console) Width() int {
+	if !c.rich {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.refreshWidth()
+	return c.width
+}
+
 func (c *Console) Style(text string, style Style) string {
 	code, ok := codes[style]
 	if !c.color || !ok || text == "" {

@@ -363,6 +363,9 @@ func runProxy(args []string, stdout, stderr io.Writer) int {
 	var preset singleValue
 	preset.name = "preset"
 	flags.Var(&preset, "preset", "named preset from the configuration's presets block")
+	var listen singleValue
+	listen.name = "listen"
+	flags.Var(&listen, "listen", "loopback address to bind, overriding the configured listen")
 	var budget budgetValue
 	flags.Var(&budget, "budget", "refuse generation requests once this run's estimated cost reaches this amount")
 	colorFlag := flags.String("color", "auto", "colorize text output: auto, always, or never")
@@ -396,12 +399,25 @@ func runProxy(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 	}
+	if listen.set {
+		listen.value = strings.TrimSpace(listen.value)
+		if err := config.ValidateListenAddress(listen.value); err != nil {
+			diagnostic(stderr, *logFormat, fmt.Errorf("invalid --listen: %w", err))
+			return 2
+		}
+	}
 	loaded, err := loadConfiguration(*configPath, preset.value)
 	if err != nil {
 		diagnostic(stderr, *logFormat, err)
 		return 1
 	}
 	path, cfg := loaded.path, loaded.effective
+	// --listen replaces whichever address the configuration resolved to, the
+	// top-level one or a preset's. A single run binds one address, so the
+	// port-uniqueness check across presets has nothing left to say here.
+	if listen.set {
+		cfg.Listen = listen.value
+	}
 	// A preset supplies the session tag; --session-tag overrides it for one
 	// run, the same way --report-dir overrides reporting.directory.
 	if !sessionTag.set {

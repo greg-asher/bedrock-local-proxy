@@ -338,33 +338,57 @@ func (r *Recorder) MarkIncomplete(count int) {
 // no information are omitted rather than printed as "unavailable"; the
 // complete record is always in the session report and in --log-format json.
 func requestLine(out *console.Console, entry requestRecord, observed time.Time) string {
+	return requestLineAtWidth(out, entry, observed, out.Width())
+}
+
+func requestLineAtWidth(out *console.Console, entry requestRecord, observed time.Time, width int) string {
 	succeeded := entry.Outcome == string(server.CompletionSucceeded)
 	route := strings.TrimPrefix(entry.Endpoint, "/v1/")
 	if index := strings.Index(route, "/"); index >= 0 {
 		route = route[:index]
 	}
+	showTime := width == 0 || width >= 54
+	showModel := succeeded || width == 0 || width >= 48
+	showUsage := width == 0 || width >= 78
+	showCache := width == 0 || width >= 91
+	showCost := width == 0 || width >= 48
+	if !succeeded {
+		showTime = width == 0 || width >= 64
+		showUsage = width == 0 || width >= 100
+		showCache = width == 0 || width >= 120
+		showCost = width == 0 || width >= 76
+	}
+
 	columns := []string{
-		out.Style(observed.Format("15:04:05"), console.Dim),
 		out.Glyph(succeeded),
 		padCell(route, 10),
-		out.Style(padCell(entry.LocalModel, 12), console.Cyan),
-		padLeft(console.Duration(time.Duration(entry.LatencyMS*float64(time.Millisecond))), 7),
 	}
-	if entry.InputTokens != nil || entry.OutputTokens != nil {
+	if showTime {
+		columns = append([]string{out.Style(observed.Format("15:04:05"), console.Dim)}, columns...)
+	}
+	if showModel {
+		columns = append(columns, out.Style(padCell(entry.LocalModel, 12), console.Cyan))
+	}
+	columns = append(columns, padLeft(console.Duration(time.Duration(entry.LatencyMS*float64(time.Millisecond))), 7))
+	if showUsage && (entry.InputTokens != nil || entry.OutputTokens != nil) {
 		columns = append(columns, padCell("in "+console.Tokens(deref(entry.InputTokens)), 11), padCell("out "+console.Tokens(deref(entry.OutputTokens)), 11))
-	} else {
+	} else if showUsage {
 		columns = append(columns, padCell("", 11), padCell("", 11))
 	}
-	if cache := deref(entry.CacheReadInputTokens) + deref(entry.CacheWriteInputTokens); cache > 0 {
+	if cache := deref(entry.CacheReadInputTokens) + deref(entry.CacheWriteInputTokens); showCache && cache > 0 {
 		columns = append(columns, out.Style(padCell("cache "+console.Tokens(cache), 12), console.Dim))
 	}
-	if entry.EstimatedCost != nil {
+	if showCost && entry.EstimatedCost != nil {
 		columns = append(columns, out.Style(console.Money(*entry.EstimatedCost), console.Yellow))
 	}
 	if !succeeded {
 		detail := entry.FailureCategory
 		if entry.HTTPStatus != nil {
 			detail = fmt.Sprintf("%d %s", *entry.HTTPStatus, detail)
+		}
+		if width > 0 {
+			used := len([]rune(stripStyles(strings.Join(columns, " ")))) + 1
+			detail = truncateCell(strings.TrimSpace(detail), width-used)
 		}
 		columns = append(columns, out.Style(strings.TrimSpace(detail), console.Red))
 	}
@@ -375,6 +399,17 @@ func requestLine(out *console.Console, entry requestRecord, observed time.Time) 
 		return out.Style(stripStyles(line), console.Dim)
 	}
 	return line
+}
+
+func truncateCell(value string, width int) string {
+	runes := []rune(value)
+	if len(runes) <= width {
+		return value
+	}
+	if width <= 1 {
+		return "…"
+	}
+	return string(runes[:width-1]) + "…"
 }
 
 func stripStyles(line string) string {

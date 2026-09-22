@@ -88,3 +88,51 @@ func TestRequestLineOmitsAbsentUsageInsteadOfPrintingUnavailable(t *testing.T) {
 		t.Errorf("line = %q", line)
 	}
 }
+
+func TestRequestLineAdaptsFromFortyColumnsUp(t *testing.T) {
+	out := console.New(&bytes.Buffer{}, console.ColorNever)
+	status := 200
+	input, output, cacheRead, cost := int64(1240), int64(340), int64(12000), 0.0048
+	entry := requestRecord{
+		Endpoint: "/v1/messages", LocalModel: "coding", Outcome: "success", HTTPStatus: &status, LatencyMS: 1200,
+		InputTokens: &input, OutputTokens: &output, CacheReadInputTokens: &cacheRead, EstimatedCost: &cost,
+	}
+	for _, test := range []struct {
+		width int
+		want  []string
+		drop  []string
+	}{
+		{40, []string{"messages", "coding", "1.2s"}, []string{"14:13:49", "in 1.2k", "$0.0048"}},
+		{48, []string{"$0.0048"}, []string{"14:13:49", "in 1.2k", "cache 12k"}},
+		{54, []string{"14:13:49", "$0.0048"}, []string{"in 1.2k", "cache 12k"}},
+		{78, []string{"in 1.2k", "out 340"}, []string{"cache 12k"}},
+		{91, []string{"cache 12k"}, nil},
+	} {
+		line := requestLineAtWidth(out, entry, time.Date(2026, 9, 20, 14, 13, 49, 0, time.Local), test.width)
+		if len([]rune(stripStyles(line))) > test.width {
+			t.Errorf("width %d overflowed: %q", test.width, line)
+		}
+		for _, want := range test.want {
+			if !strings.Contains(line, want) {
+				t.Errorf("width %d missing %q: %q", test.width, want, line)
+			}
+		}
+		for _, drop := range test.drop {
+			if strings.Contains(line, drop) {
+				t.Errorf("width %d kept %q: %q", test.width, drop, line)
+			}
+		}
+	}
+}
+
+func TestNarrowFailureLineKeepsTheFailure(t *testing.T) {
+	out := console.New(&bytes.Buffer{}, console.ColorNever)
+	status := 429
+	line := requestLineAtWidth(out, requestRecord{
+		Endpoint: "/v1/chat/completions", LocalModel: "coding", Outcome: "failure", HTTPStatus: &status,
+		LatencyMS: 120, FailureCategory: "upstream_http_response",
+	}, time.Time{}, 40)
+	if len([]rune(stripStyles(line))) > 40 || !strings.Contains(line, "429 upstream") || strings.Contains(line, "coding") {
+		t.Fatalf("40-column failure line = %q", line)
+	}
+}

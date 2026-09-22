@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -536,4 +537,57 @@ func startHelperWith(t *testing.T, path, format string) (*exec.Cmd, *bufio.Reade
 		}
 	}
 	return cmd, reader, listening
+}
+
+func TestRunRejectsInvalidListen(t *testing.T) {
+	for _, args := range [][]string{
+		{"--listen", "127.0.0.1:8787", "--listen", "127.0.0.1:8788"},
+		{"--listen", "0.0.0.0:8787"},
+		{"--listen", "8787"},
+		{"--listen", " \t "},
+	} {
+		var out, errOut bytes.Buffer
+		// "--listen" with both dashes: an unknown-flag error would name the
+		// single-dash form, and must not satisfy this assertion.
+		if code := run(args, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "--listen") {
+			t.Fatalf("run(%q) code=%d stderr=%q", args, code, errOut.String())
+		}
+	}
+}
+
+// --listen must win over the address the configuration resolved to. Pointing
+// it at a port this test already holds proves the proxy bound the overriding
+// address rather than the configured ephemeral one, which would have started.
+func TestRunListenOverridesConfiguredAddress(t *testing.T) {
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	path := writeTestConfig(t, "127.0.0.1:0")
+	var out, errOut bytes.Buffer
+	code := run([]string{"--config", path, "--report-dir", t.TempDir(), "--listen", held.Addr().String()}, &out, &errOut)
+	if code == 0 || !strings.Contains(errOut.String(), held.Addr().String()) {
+		t.Fatalf("listen override code=%d stderr=%q", code, errOut.String())
+	}
+}
+
+// The same override applies to a preset's own listen, so one run can move a
+// preset off its configured port without editing the configuration.
+func TestRunListenOverridesPresetAddress(t *testing.T) {
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := "version: 1\naws:\n  profile: YOUR_AWS_PROFILE\n  region: us-east-2\nlisten: 127.0.0.1:0\nmodels:\n  coding:\n    bedrock_model_id: model-a\npresets:\n  cheap:\n    listen: 127.0.0.1:8799\n    models: [coding]\n"
+	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	code := run([]string{"--config", path, "--report-dir", t.TempDir(), "--preset", "cheap", "--listen", held.Addr().String()}, &out, &errOut)
+	if code == 0 || !strings.Contains(errOut.String(), held.Addr().String()) || strings.Contains(errOut.String(), "8799") {
+		t.Fatalf("preset listen override code=%d stderr=%q", code, errOut.String())
+	}
 }
