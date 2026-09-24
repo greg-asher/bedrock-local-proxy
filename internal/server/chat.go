@@ -158,6 +158,15 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer body.Close()
 	response.Body = body
+	if response.StatusCode >= 200 && response.StatusCode < 300 {
+		// Bedrock numbers tool calls per response; make repeated index ids unique
+		// so clients can tell one turn's call from the next (see toolcallids.go).
+		response.Body = struct {
+			io.Reader
+			io.Closer
+		}{newToolCallIDRewriter(body, s.toolCallSuffix()), body}
+		body = response.Body
+	}
 
 	copyHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)

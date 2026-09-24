@@ -30,14 +30,17 @@ type Server struct {
 	stopping           bool
 	pendingCompletions int
 	budget             *budgetLimit
+	// toolCallSuffix names each chat response's tool call id suffix; tests replace it.
+	toolCallSuffix func() string
 }
 
 func New(cfg config.Config) *Server {
 	s := &Server{
-		cfg:           cfg,
-		transport:     &lazyTransport{profile: cfg.AWS.Profile, region: cfg.AWS.Region},
-		active:        make(map[uint64]context.CancelFunc),
-		activeChanged: make(chan struct{}),
+		cfg:            cfg,
+		transport:      &lazyTransport{profile: cfg.AWS.Profile, region: cfg.AWS.Region},
+		active:         make(map[uint64]context.CancelFunc),
+		activeChanged:  make(chan struct{}),
+		toolCallSuffix: randomToolCallSuffix,
 	}
 	s.http = &http.Server{Handler: s}
 	return s
