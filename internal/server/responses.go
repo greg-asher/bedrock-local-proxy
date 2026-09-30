@@ -586,11 +586,13 @@ func (s *Server) serveResponsesStream(w http.ResponseWriter, r *http.Request, st
 		FunctionToolCalls:              observer.functionCalls,
 	}
 	mergeCompletionMetadata(&result, s.responsesCompletionMetadata(r, localModel))
-	normalEnd := copyErr == nil || errors.Is(copyErr, io.EOF)
-	if response.StatusCode >= 200 && response.StatusCode < 300 && normalEnd && observer.sawTerminal && observer.sawSuccess && !observer.sawFailure {
+	// The observer runs only after bytes are written to the client. Codex may
+	// close the connection immediately after response.completed, before upstream
+	// EOF. A delivered terminal event takes precedence over that cancellation.
+	if response.StatusCode >= 200 && response.StatusCode < 300 && observer.sawTerminal && observer.sawSuccess && !observer.sawFailure {
 		result.Outcome = CompletionSucceeded
 	}
-	if errors.Is(r.Context().Err(), context.Canceled) || errors.Is(copyErr, context.Canceled) {
+	if !observer.sawTerminal && (errors.Is(r.Context().Err(), context.Canceled) || errors.Is(copyErr, context.Canceled)) {
 		result.Outcome = CompletionCanceled
 	}
 	s.finishCompletion(started, result)
