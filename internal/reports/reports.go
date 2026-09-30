@@ -131,6 +131,7 @@ type event struct {
 	UpstreamModel                  string   `json:"upstream_model"`
 	Outcome                        string   `json:"outcome"`
 	FailureCategory                string   `json:"failure_category"`
+	FailureClass                   string   `json:"failure_class"`
 	HTTPStatus                     *int     `json:"http_status"`
 	InputTokens                    *int64   `json:"input_tokens"`
 	OutputTokens                   *int64   `json:"output_tokens"`
@@ -236,7 +237,10 @@ func Generate(o Options) (Report, error) {
 			applyBreakdown(tags, label(x.SessionTag, "untagged"), x)
 			applyBreakdown(presets, label(x.Preset, "no preset"), x)
 			if x.Outcome != "success" {
-				cat := x.FailureCategory
+				cat := x.FailureClass
+				if cat == "" {
+					cat = x.FailureCategory
+				}
 				if cat == "" {
 					cat = legacyFailureCategory(x)
 				}

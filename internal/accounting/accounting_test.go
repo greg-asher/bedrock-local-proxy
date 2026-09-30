@@ -75,6 +75,35 @@ func TestJSONRecordsAndSummaryUseRealCompletionMetadata(t *testing.T) {
 	}
 }
 
+func TestJSONRecordsCarryFailureClassAndClientIdentity(t *testing.T) {
+	var output bytes.Buffer
+	recorder := New(&output, FormatJSON, nil)
+	status, retryAfter, retryable := 429, int64(7000), true
+	recorder.Record(server.CompletionResult{
+		Endpoint: "/v1/responses", LocalModel: "coding", HTTPStatus: &status, Outcome: server.CompletionFailed, FailureCategory: "upstream_http",
+		FailureClass: "throttled", Retryable: &retryable, RetryAfterMS: &retryAfter, UpstreamCode: "ThrottlingException", ClientSessionID: "thread-1", ClientRun: "run-1",
+	})
+	recorder.Record(server.CompletionResult{Endpoint: "/v1/responses", LocalModel: "coding", HTTPStatus: &status, Outcome: server.CompletionSucceeded})
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines: %q", len(lines), output.String())
+	}
+	var failed map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &failed); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]any{"failure_class": "throttled", "retryable": true, "retry_after_ms": float64(7000), "upstream_code": "ThrottlingException", "client_session_id": "thread-1", "client_run": "run-1", "failure_category": "upstream_http"} {
+		if failed[key] != want {
+			t.Fatalf("%s = %#v, want %#v in %s", key, failed[key], want, lines[0])
+		}
+	}
+	for _, key := range []string{"failure_class", "retryable", "retry_after_ms", "upstream_code", "client_session_id", "client_run"} {
+		if strings.Contains(lines[1], `"`+key+`"`) {
+			t.Fatalf("success record carries %s: %s", key, lines[1])
+		}
+	}
+}
+
 func TestEstimatesDistinguishZeroMissingAndUncoveredPrices(t *testing.T) {
 	zero := 0.0
 	var output bytes.Buffer

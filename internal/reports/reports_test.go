@@ -160,3 +160,24 @@ func TestDonutLegendRendersBelowTheChart(t *testing.T) {
 		t.Fatalf("donut chart does not place its legend below the SVG: %s", chart)
 	}
 }
+func TestFailureBreakdownsPreferFailureClass(t *testing.T) {
+	p := t.TempDir()
+	start := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	at := start.Add(time.Hour).Format(time.RFC3339Nano)
+	status := 429
+	writeSession(t, p, "s", []event{
+		{Event: "request", Timestamp: at, Endpoint: "/v1/responses", Outcome: "failure", FailureCategory: "upstream_http", FailureClass: "throttled", HTTPStatus: &status},
+		{Event: "request", Timestamp: at, Endpoint: "/v1/responses", Outcome: "failure", FailureCategory: "transport"},
+	})
+	r, e := Generate(Options{Directory: p, Start: start, Stop: start.Add(24 * time.Hour)})
+	if e != nil || len(r.FailureBreakdowns) != 2 {
+		t.Fatalf("breakdowns %#v %v", r.FailureBreakdowns, e)
+	}
+	got := map[string]bool{}
+	for _, f := range r.FailureBreakdowns {
+		got[f.Category] = true
+	}
+	if !got["throttled"] || !got["transport"] {
+		t.Fatalf("categories = %v, want class then legacy category", got)
+	}
+}

@@ -159,7 +159,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(`{"error":{"message":"proxy is shutting down","type":"server_error"}}`))
-		s.finishCompletion(started, CompletionResult{Endpoint: r.URL.Path, HTTPStatus: &status, Outcome: CompletionFailed, FailureCategory: "shutdown"})
+		s.finishCompletion(r, started, CompletionResult{Endpoint: r.URL.Path, HTTPStatus: &status, Outcome: CompletionFailed, FailureCategory: "shutdown", FailureClass: "shutdown"})
 		return
 	}
 	defer s.endRequest(requestID)
@@ -193,7 +193,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	status := http.StatusNotFound
 	http.NotFound(w, r)
-	s.finishCompletion(started, CompletionResult{Endpoint: r.URL.Path, HTTPStatus: &status, Outcome: CompletionFailed})
+	s.finishCompletion(r, started, CompletionResult{Endpoint: r.URL.Path, HTTPStatus: &status, Outcome: CompletionFailed})
 }
 
 func (s *Server) serveModelList(w http.ResponseWriter, r *http.Request, started time.Time) {
@@ -201,7 +201,7 @@ func (s *Server) serveModelList(w http.ResponseWriter, r *http.Request, started 
 		w.Header().Set("Allow", http.MethodGet)
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		status := http.StatusMethodNotAllowed
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/models", HTTPStatus: &status, Outcome: CompletionFailed})
+		s.finishCompletion(r, started, CompletionResult{Endpoint: "/v1/models", HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 	names := make([]string, 0, len(s.cfg.Models))
@@ -219,7 +219,7 @@ func (s *Server) serveModelList(w http.ResponseWriter, r *http.Request, started 
 	if err := json.NewEncoder(w).Encode(modelList{Object: "list", Data: data}); err != nil {
 		outcome = CompletionFailed
 	}
-	s.finishCompletion(started, CompletionResult{Endpoint: "/v1/models", HTTPStatus: &status, Outcome: outcome})
+	s.finishCompletion(r, started, CompletionResult{Endpoint: "/v1/models", HTTPStatus: &status, Outcome: outcome})
 }
 
 func (s *Server) serveModel(w http.ResponseWriter, r *http.Request, started time.Time, alias string) {
@@ -228,19 +228,19 @@ func (s *Server) serveModel(w http.ResponseWriter, r *http.Request, started time
 		w.Header().Set("Allow", http.MethodGet)
 		status := http.StatusMethodNotAllowed
 		w.WriteHeader(status)
-		s.finishCompletion(started, CompletionResult{Endpoint: endpoint, LocalModel: alias, HTTPStatus: &status, Outcome: CompletionFailed})
+		s.finishCompletion(r, started, CompletionResult{Endpoint: endpoint, LocalModel: alias, HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 	if alias == "" {
 		status := http.StatusNotFound
 		s.writeOpenAIErrorDetails(w, status, "model not found", "invalid_request_error", "model", "model_not_found")
-		s.finishCompletion(started, CompletionResult{Endpoint: endpoint, HTTPStatus: &status, Outcome: CompletionFailed})
+		s.finishCompletion(r, started, CompletionResult{Endpoint: endpoint, HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 	if _, ok := s.cfg.Models[alias]; !ok {
 		status := http.StatusNotFound
 		s.writeOpenAIErrorDetails(w, status, fmt.Sprintf("model %q not found", alias), "invalid_request_error", "model", "model_not_found")
-		s.finishCompletion(started, CompletionResult{Endpoint: endpoint, LocalModel: alias, HTTPStatus: &status, Outcome: CompletionFailed})
+		s.finishCompletion(r, started, CompletionResult{Endpoint: endpoint, LocalModel: alias, HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -249,7 +249,7 @@ func (s *Server) serveModel(w http.ResponseWriter, r *http.Request, started time
 	if err := json.NewEncoder(w).Encode(modelRecord{ID: alias, Object: "model", Created: modelCreatedUnix, Owner: "bedrock-local-proxy"}); err != nil {
 		outcome = CompletionFailed
 	}
-	s.finishCompletion(started, CompletionResult{Endpoint: endpoint, LocalModel: alias, HTTPStatus: &status, Outcome: outcome})
+	s.finishCompletion(r, started, CompletionResult{Endpoint: endpoint, LocalModel: alias, HTTPStatus: &status, Outcome: outcome})
 }
 
 func (s *Server) beginRequest(r *http.Request) (uint64, context.Context, bool) {
