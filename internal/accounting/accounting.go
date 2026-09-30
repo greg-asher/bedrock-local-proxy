@@ -63,6 +63,7 @@ type requestRecord struct {
 	RetryAfterMS                   *int64   `json:"retry_after_ms,omitempty"`
 	UpstreamCode                   string   `json:"upstream_code,omitempty"`
 	ClientSessionID                string   `json:"client_session_id,omitempty"`
+	ClientThreadID                 string   `json:"client_thread_id,omitempty"`
 	ClientRun                      string   `json:"client_run,omitempty"`
 	UsageWarnings                  []string `json:"usage_warnings,omitempty"`
 	InputTokens                    *int64   `json:"input_tokens,omitempty"`
@@ -161,7 +162,7 @@ func (r *Recorder) Record(result server.CompletionResult) {
 		CacheReadInputTokens: result.CacheReadInputTokens, CacheWriteInputTokens: result.CacheWriteInputTokens, InputTokensIncludeCache: result.InputTokensIncludeCache,
 		CostStatus: "unavailable", UsageStatus: usageStatus, ObservedUncoveredBillingFields: result.ObservedUncoveredBillingFields, UsageWarnings: sortedWarnings(result.UsageWarnings), FailureCategory: result.FailureCategory,
 		FailureClass: result.FailureClass, Retryable: result.Retryable, RetryAfterMS: result.RetryAfterMS, UpstreamCode: result.UpstreamCode,
-		ClientSessionID: result.ClientSessionID, ClientRun: result.ClientRun,
+		ClientSessionID: result.ClientSessionID, ClientThreadID: result.ClientThreadID, ClientRun: result.ClientRun,
 		ClientFamily: result.ClientFamily, ClientVersion: result.ClientVersion, MetadataProfile: result.MetadataProfile,
 		MetadataRevision: result.MetadataRevision, CatalogHash: result.CatalogHash, SettingsHash: result.SettingsHash, FunctionToolCalls: result.FunctionToolCalls,
 		UnsupportedFeatureRejections: result.UnsupportedFeatureRejections}

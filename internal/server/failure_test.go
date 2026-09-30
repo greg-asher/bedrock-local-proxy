@@ -244,6 +244,8 @@ func TestReasoningReplayRejectedNeedsEncryptedInput(t *testing.T) {
 
 func TestClientIdentityHeadersAreRecordedAndRunIsNotForwarded(t *testing.T) {
 	const session = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
+	const thread = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c"
+	metadata := `{"session_id":"` + session + `","thread_id":"` + thread + `","agent_name":"/root/worker"}`
 	success := map[string]string{
 		"/v1/chat/completions": `{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
 		"/v1/responses":        `{"output":[],"usage":{"input_tokens":1,"output_tokens":1}}`,
@@ -251,8 +253,8 @@ func TestClientIdentityHeadersAreRecordedAndRunIsNotForwarded(t *testing.T) {
 	}
 	for path, body := range success {
 		fake := upstream(http.StatusOK, nil, body)
-		result, _ := serveRecorded(t, fake, path, requestBody(path, false), http.Header{"Session-Id": []string{session}, "X-Bedrock-Proxy-Run": []string{"run_42"}})
-		if result.Outcome != CompletionSucceeded || result.ClientSessionID != session || result.ClientRun != "run_42" {
+		result, _ := serveRecorded(t, fake, path, requestBody(path, false), http.Header{"Session-Id": []string{session}, "X-Codex-Turn-Metadata": []string{metadata}, "X-Bedrock-Proxy-Run": []string{"run_42"}})
+		if result.Outcome != CompletionSucceeded || result.ClientSessionID != session || result.ClientThreadID != thread || result.ClientRun != "run_42" {
 			t.Fatalf("%s result = %+v, want recorded client identity", path, result)
 		}
 		if result.FailureClass != "" || result.Retryable != nil {
@@ -263,8 +265,8 @@ func TestClientIdentityHeadersAreRecordedAndRunIsNotForwarded(t *testing.T) {
 		}
 	}
 	for _, invalid := range []string{"has space", strings.Repeat("a", 65), "semi;colon"} {
-		result, _ := serveRecorded(t, upstream(http.StatusOK, nil, success["/v1/responses"]), "/v1/responses", requestBody("/v1/responses", false), http.Header{"Session-Id": []string{invalid}, "X-Bedrock-Proxy-Run": []string{invalid}})
-		if result.ClientSessionID != "" || result.ClientRun != "" {
+		result, _ := serveRecorded(t, upstream(http.StatusOK, nil, success["/v1/responses"]), "/v1/responses", requestBody("/v1/responses", false), http.Header{"Session-Id": []string{invalid}, "X-Codex-Turn-Metadata": []string{`{"thread_id":"` + invalid + `"}`}, "X-Bedrock-Proxy-Run": []string{invalid}})
+		if result.ClientSessionID != "" || result.ClientThreadID != "" || result.ClientRun != "" {
 			t.Fatalf("invalid identity %q was recorded: %+v", invalid, result)
 		}
 	}

@@ -55,6 +55,7 @@ type CompletionResult struct {
 	RetryAfterMS                   *int64
 	UpstreamCode                   string
 	ClientSessionID                string
+	ClientThreadID                 string
 	ClientRun                      string
 	ClientFamily                   string
 	ClientVersion                  string
@@ -801,6 +802,7 @@ func (s *Server) finishCompletion(r *http.Request, started time.Time, result Com
 	}
 	if generationEndpoint(r.URL.Path) {
 		result.ClientSessionID = validClientID(r.Header.Get("Session-Id"))
+		result.ClientThreadID = codexThreadID(r.Header.Get("X-Codex-Turn-Metadata"))
 		result.ClientRun = validClientID(r.Header.Get("X-Bedrock-Proxy-Run"))
 	}
 	result.Elapsed = time.Since(started)

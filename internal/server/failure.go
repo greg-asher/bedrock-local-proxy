@@ -221,6 +221,19 @@ func retryAfterMS(header http.Header) *int64 {
 	return &ms
 }
 
+// codexThreadID reads thread_id from Codex's turn metadata header. Session-Id
+// names the root session, which Codex subagents share; thread_id names the
+// thread that made this request.
+func codexThreadID(metadata string) string {
+	var fields struct {
+		ThreadID string `json:"thread_id"`
+	}
+	if json.Unmarshal([]byte(metadata), &fields) != nil {
+		return ""
+	}
+	return validClientID(fields.ThreadID)
+}
+
 func validClientID(value string) string {
 	if clientIDPattern.MatchString(value) {
 		return value
