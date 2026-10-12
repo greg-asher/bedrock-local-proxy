@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/gregasher/bedrock-local-proxy/internal/config"
+	"github.com/greg-asher/bedrock-local-proxy/internal/config"
 )
 
 func TestEstimatePricesOpenAIAndMessagesCacheSemantics(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/gregasher/bedrock-local-proxy/internal/config"
+	"github.com/greg-asher/bedrock-local-proxy/internal/config"
 )
 
 // prompter asks for one setting at a time. When prompting is disabled it

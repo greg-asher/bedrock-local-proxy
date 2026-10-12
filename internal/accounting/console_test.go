@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gregasher/bedrock-local-proxy/internal/console"
-	"github.com/gregasher/bedrock-local-proxy/internal/server"
+	"github.com/greg-asher/bedrock-local-proxy/internal/console"
+	"github.com/greg-asher/bedrock-local-proxy/internal/server"
 )
 
 // The console footer reads live totals back from the recorder, so a recorder

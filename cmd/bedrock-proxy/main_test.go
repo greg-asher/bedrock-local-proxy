@@ -15,11 +15,11 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/gregasher/bedrock-local-proxy/internal/accounting"
-	"github.com/gregasher/bedrock-local-proxy/internal/codex"
-	"github.com/gregasher/bedrock-local-proxy/internal/config"
-	"github.com/gregasher/bedrock-local-proxy/internal/console"
-	"github.com/gregasher/bedrock-local-proxy/internal/reports"
+	"github.com/greg-asher/bedrock-local-proxy/internal/accounting"
+	"github.com/greg-asher/bedrock-local-proxy/internal/codex"
+	"github.com/greg-asher/bedrock-local-proxy/internal/config"
+	"github.com/greg-asher/bedrock-local-proxy/internal/console"
+	"github.com/greg-asher/bedrock-local-proxy/internal/reports"
 )
 
 type mainCodexRunner struct{}

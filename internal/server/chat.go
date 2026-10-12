@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gregasher/bedrock-local-proxy/internal/config"
-	"github.com/gregasher/bedrock-local-proxy/internal/transport"
+	"github.com/greg-asher/bedrock-local-proxy/internal/config"
+	"github.com/greg-asher/bedrock-local-proxy/internal/transport"
 )
 
 // RequestDoer is the shared transport contract used by protocol handlers.

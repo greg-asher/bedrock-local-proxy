@@ -1,7 +1,7 @@
 // Package pricing applies user-supplied model rates to normalized usage.
 package pricing
 
-import "github.com/gregasher/bedrock-local-proxy/internal/config"
+import "github.com/greg-asher/bedrock-local-proxy/internal/config"
 
 const (
 	openAICacheReadMultiplier  = 0.10

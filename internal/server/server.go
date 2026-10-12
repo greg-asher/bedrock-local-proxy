@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gregasher/bedrock-local-proxy/internal/config"
-	"github.com/gregasher/bedrock-local-proxy/internal/transport"
+	"github.com/greg-asher/bedrock-local-proxy/internal/config"
+	"github.com/greg-asher/bedrock-local-proxy/internal/transport"
 )
 
 var modelCreatedUnix = time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC).Unix()

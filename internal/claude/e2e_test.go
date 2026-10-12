@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gregasher/bedrock-local-proxy/internal/config"
-	"github.com/gregasher/bedrock-local-proxy/internal/server"
+	"github.com/greg-asher/bedrock-local-proxy/internal/config"
+	"github.com/greg-asher/bedrock-local-proxy/internal/server"
 )
 
 const claudeFakeSearchResult = "CLAUDE_FAKE_SEARCH_RESULT_42"
