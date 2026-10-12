@@ -18,14 +18,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gregasher/bedrock-local-proxy/internal/accounting"
-	"github.com/gregasher/bedrock-local-proxy/internal/claude"
-	"github.com/gregasher/bedrock-local-proxy/internal/codex"
-	"github.com/gregasher/bedrock-local-proxy/internal/config"
-	"github.com/gregasher/bedrock-local-proxy/internal/console"
-	"github.com/gregasher/bedrock-local-proxy/internal/doctor"
-	"github.com/gregasher/bedrock-local-proxy/internal/reports"
-	"github.com/gregasher/bedrock-local-proxy/internal/server"
+	"github.com/greg-asher/bedrock-local-proxy/internal/accounting"
+	"github.com/greg-asher/bedrock-local-proxy/internal/claude"
+	"github.com/greg-asher/bedrock-local-proxy/internal/codex"
+	"github.com/greg-asher/bedrock-local-proxy/internal/config"
+	"github.com/greg-asher/bedrock-local-proxy/internal/console"
+	"github.com/greg-asher/bedrock-local-proxy/internal/doctor"
+	"github.com/greg-asher/bedrock-local-proxy/internal/reports"
+	"github.com/greg-asher/bedrock-local-proxy/internal/server"
 )
 
 var version = "dev"

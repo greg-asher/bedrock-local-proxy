@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gregasher/bedrock-local-proxy/internal/transport"
+	"github.com/greg-asher/bedrock-local-proxy/internal/transport"
 )
 
 const secretMessage = "secret upstream message text"

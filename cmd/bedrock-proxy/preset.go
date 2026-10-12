@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gregasher/bedrock-local-proxy/internal/config"
+	"github.com/greg-asher/bedrock-local-proxy/internal/config"
 )
 
 // runPresetCreate adds one preset to a configuration file. Every setting can

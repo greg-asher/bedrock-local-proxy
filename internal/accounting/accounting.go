@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gregasher/bedrock-local-proxy/internal/config"
-	"github.com/gregasher/bedrock-local-proxy/internal/console"
-	"github.com/gregasher/bedrock-local-proxy/internal/pricing"
-	"github.com/gregasher/bedrock-local-proxy/internal/server"
+	"github.com/greg-asher/bedrock-local-proxy/internal/config"
+	"github.com/greg-asher/bedrock-local-proxy/internal/console"
+	"github.com/greg-asher/bedrock-local-proxy/internal/pricing"
+	"github.com/greg-asher/bedrock-local-proxy/internal/server"
 )
 
 type Format string

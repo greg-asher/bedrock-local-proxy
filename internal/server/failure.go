@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gregasher/bedrock-local-proxy/internal/transport"
+	"github.com/greg-asher/bedrock-local-proxy/internal/transport"
 )
 
 // Failure classes are the stable, metadata-only cause a supervisor reads to

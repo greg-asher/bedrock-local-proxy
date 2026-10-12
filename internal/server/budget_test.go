@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gregasher/bedrock-local-proxy/internal/config"
+	"github.com/greg-asher/bedrock-local-proxy/internal/config"
 )
 
 // budgetTestConfig prices every alias, so a test exercises the ceiling rather

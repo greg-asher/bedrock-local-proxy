@@ -1,4 +1,4 @@
-module github.com/gregasher/bedrock-local-proxy
+module github.com/greg-asher/bedrock-local-proxy
 
 go 1.24
 

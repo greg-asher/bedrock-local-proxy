@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gregasher/bedrock-local-proxy/internal/codex"
-	"github.com/gregasher/bedrock-local-proxy/internal/config"
-	"github.com/gregasher/bedrock-local-proxy/internal/server"
+	"github.com/greg-asher/bedrock-local-proxy/internal/codex"
+	"github.com/greg-asher/bedrock-local-proxy/internal/config"
+	"github.com/greg-asher/bedrock-local-proxy/internal/server"
 )
 
 const fakeSearchResult = "FAKE_SEARCH_RESULT_42"

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gregasher/bedrock-local-proxy/internal/config"
+	"github.com/greg-asher/bedrock-local-proxy/internal/config"
 )
 
 func TestShutdownRejectionPreservesPendingAcceptedCompletion(t *testing.T) {

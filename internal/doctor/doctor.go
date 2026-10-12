@@ -17,9 +17,9 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/gregasher/bedrock-local-proxy/internal/claude"
-	"github.com/gregasher/bedrock-local-proxy/internal/codex"
-	"github.com/gregasher/bedrock-local-proxy/internal/config"
+	"github.com/greg-asher/bedrock-local-proxy/internal/claude"
+	"github.com/greg-asher/bedrock-local-proxy/internal/codex"
+	"github.com/greg-asher/bedrock-local-proxy/internal/config"
 )
 
 type Status string

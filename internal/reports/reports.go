@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gregasher/bedrock-local-proxy/internal/config"
-	"github.com/gregasher/bedrock-local-proxy/internal/pricing"
+	"github.com/greg-asher/bedrock-local-proxy/internal/config"
+	"github.com/greg-asher/bedrock-local-proxy/internal/pricing"
 )
 
 const schemaVersion = 1

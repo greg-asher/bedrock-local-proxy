@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gregasher/bedrock-local-proxy/internal/claude"
-	"github.com/gregasher/bedrock-local-proxy/internal/codex"
+	"github.com/greg-asher/bedrock-local-proxy/internal/claude"
+	"github.com/greg-asher/bedrock-local-proxy/internal/codex"
 )
 
 // Simultaneously running presets must not share a generated artifact. Each of
