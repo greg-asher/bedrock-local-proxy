@@ -35,7 +35,7 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
 		result := s.messagesCompletionMetadata(r, "")
 		result.Endpoint, result.HTTPStatus, result.Outcome = "/v1/messages", &status, CompletionFailed
-		s.finishCompletion(started, result)
+		s.finishCompletion(r, started, result)
 		return
 	}
 
@@ -44,11 +44,12 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusBadRequest
 		s.writeAnthropicError(w, status, err.Error(), "invalid_request_error")
 		result := s.messagesFailureResult(r, localModel, status, CompletionFailed)
+		result.FailureClass = "local_validation"
 		var validation *messagesValidationError
 		if errors.As(err, &validation) && validation.unsupported {
 			result.UnsupportedFeatureRejections = 1
 		}
-		s.finishCompletion(started, result)
+		s.finishCompletion(r, started, result)
 		return
 	}
 	if s.refuseUnpricedModel(w, r, started, localModel) {
@@ -57,7 +58,9 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 	if s.transport == nil {
 		status := http.StatusBadGateway
 		s.writeAnthropicError(w, status, "AWS transport is not configured", "api_error")
-		s.finishCompletion(started, s.messagesFailureResult(r, localModel, status, CompletionFailed))
+		result := s.messagesFailureResult(r, localModel, status, CompletionFailed)
+		result.FailureCategory, result.FailureClass = "transport", "proxy_configuration"
+		s.finishCompletion(r, started, result)
 		return
 	}
 
@@ -65,12 +68,13 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		status := http.StatusBadGateway
 		s.writeAnthropicError(w, status, "could not create upstream request", "api_error")
-		s.finishCompletion(started, s.messagesFailureResult(r, localModel, status, CompletionFailed))
+		s.finishCompletion(r, started, s.messagesFailureResult(r, localModel, status, CompletionFailed))
 		return
 	}
 	upstreamRequest.Header = r.Header.Clone()
 	upstreamRequest.Header.Set("Content-Type", "application/json")
 	upstreamRequest.Header.Del("X-Bedrock-Proxy-Claude-Settings")
+	upstreamRequest.Header.Del("X-Bedrock-Proxy-Run")
 
 	response, err := s.transport.Do(r.Context(), upstreamRequest)
 	if err != nil {
@@ -80,13 +84,15 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, context.Canceled) || transport.ClassOf(err) == transport.FailureCanceled {
 			outcome = CompletionCanceled
 		}
-		s.finishCompletion(started, s.messagesFailureResult(r, localModel, status, outcome))
+		result := s.messagesFailureResult(r, localModel, status, outcome)
+		result.FailureCategory, result.FailureClass = transportFailureCategory(outcome), transportFailureClass(err)
+		s.finishCompletion(r, started, result)
 		return
 	}
 	if response == nil {
 		status := http.StatusBadGateway
 		s.writeAnthropicError(w, status, "AWS upstream returned no response", "api_error")
-		s.finishCompletion(started, s.messagesFailureResult(r, localModel, status, CompletionFailed))
+		s.finishCompletion(r, started, s.messagesFailureResult(r, localModel, status, CompletionFailed))
 		return
 	}
 	body := response.Body
@@ -98,24 +104,28 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request) {
 
 	copyHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
-	if stream {
+	success := response.StatusCode >= 200 && response.StatusCode < 300
+	if stream && success {
 		s.serveMessagesStream(w, r, started, localModel, response)
 		return
 	}
 	observed, copyErr := relayAndObserve(w, body, maxUsageObservationBytes)
 	status := response.StatusCode
 	result := s.messagesFailureResult(r, localModel, status, CompletionFailed)
-	if copyErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
+	if copyErr == nil && success {
 		result.Outcome = CompletionSucceeded
 	}
 	if copyErr != nil && (errors.Is(copyErr, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled)) {
 		result.Outcome = CompletionCanceled
 	}
+	if result.Outcome == CompletionFailed && !success {
+		classifyUpstreamResponse(&result, status, response.Header, observed, false)
+	}
 	if observed != nil {
 		applyCompletionUsage(&result, parseMessagesUsage(observed))
 		result.FunctionToolCalls = countMessageToolCalls(observed)
 	}
-	s.finishCompletion(started, result)
+	s.finishCompletion(r, started, result)
 }
 
 func (s *Server) transformMessagesRequest(r *http.Request) (string, []byte, bool, error) {
@@ -192,9 +202,14 @@ type anthropicErrorEnvelope struct {
 type anthropicError struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
+	Code    string `json:"code,omitempty"`
 }
 
 func (s *Server) writeAnthropicError(w http.ResponseWriter, status int, message, kind string) {
+	s.writeAnthropicErrorCode(w, status, message, kind, "")
+}
+
+func (s *Server) writeAnthropicErrorCode(w http.ResponseWriter, status int, message, kind, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(anthropicErrorEnvelope{
@@ -202,6 +217,7 @@ func (s *Server) writeAnthropicError(w http.ResponseWriter, status int, message,
 		Error: anthropicError{
 			Type:    kind,
 			Message: message,
+			Code:    code,
 		},
 	})
 }
@@ -220,7 +236,7 @@ func (s *Server) writeAnthropicTransportError(w http.ResponseWriter, err error) 
 		kind = "authentication_error"
 		message = fmt.Sprintf("AWS credentials are unavailable for profile %s", s.cfg.AWS.Profile)
 	}
-	s.writeAnthropicError(w, status, message, kind)
+	s.writeAnthropicErrorCode(w, status, message, kind, transportFailureClass(err))
 }
 
 func parseMessagesUsage(body []byte) completionUsage {
@@ -295,6 +311,7 @@ type messagesStreamObserver struct {
 	usageInvalid          bool
 	sawStop               bool
 	sawError              bool
+	errorIdentities       []string
 	toolCalls             int
 }
 
@@ -338,6 +355,7 @@ func (o *messagesStreamObserver) observe(event sseEvent) {
 		o.sawStop = true
 	case "error":
 		o.sawError = true
+		o.errorIdentities = append(o.errorIdentities, bodyIdentities(data)...)
 	}
 }
 
@@ -464,8 +482,9 @@ func (s *Server) serveMessagesStream(w http.ResponseWriter, r *http.Request, sta
 	}
 	if result.Outcome == CompletionFailed && observer.sawError {
 		result.FailureCategory = "upstream_error"
+		result.FailureClass, result.UpstreamCode = classifyFailure(status, observer.errorIdentities)
 	}
-	s.finishCompletion(started, result)
+	s.finishCompletion(r, started, result)
 }
 
 func (s *Server) messagesCompletionMetadata(r *http.Request, alias string) CompletionResult {

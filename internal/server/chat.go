@@ -50,6 +50,13 @@ type CompletionResult struct {
 	ObservedUncoveredBillingFields bool
 	UsageWarnings                  []string
 	FailureCategory                string
+	FailureClass                   string
+	Retryable                      *bool
+	RetryAfterMS                   *int64
+	UpstreamCode                   string
+	ClientSessionID                string
+	ClientThreadID                 string
+	ClientRun                      string
 	ClientFamily                   string
 	ClientVersion                  string
 	FunctionToolCalls              int
@@ -90,7 +97,7 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Allow", http.MethodPost)
 		status := http.StatusMethodNotAllowed
 		w.WriteHeader(status)
-		s.finishCompletion(started, CompletionResult{
+		s.finishCompletion(r, started, CompletionResult{
 			Endpoint:   "/v1/chat/completions",
 			HTTPStatus: &status,
 			Outcome:    CompletionFailed,
@@ -102,11 +109,12 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		status := http.StatusBadRequest
 		s.writeOpenAIError(w, status, err.Error(), "invalid_request_error")
-		s.finishCompletion(started, CompletionResult{
-			Endpoint:   "/v1/chat/completions",
-			HTTPStatus: &status,
-			LocalModel: localModel,
-			Outcome:    CompletionFailed,
+		s.finishCompletion(r, started, CompletionResult{
+			Endpoint:     "/v1/chat/completions",
+			HTTPStatus:   &status,
+			LocalModel:   localModel,
+			Outcome:      CompletionFailed,
+			FailureClass: "local_validation",
 		})
 		return
 	}
@@ -116,11 +124,13 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if s.transport == nil {
 		status := http.StatusBadGateway
 		s.writeOpenAIError(w, status, "AWS transport is not configured", "upstream_error")
-		s.finishCompletion(started, CompletionResult{
-			Endpoint:   "/v1/chat/completions",
-			HTTPStatus: &status,
-			LocalModel: localModel,
-			Outcome:    CompletionFailed,
+		s.finishCompletion(r, started, CompletionResult{
+			Endpoint:        "/v1/chat/completions",
+			HTTPStatus:      &status,
+			LocalModel:      localModel,
+			Outcome:         CompletionFailed,
+			FailureCategory: "transport",
+			FailureClass:    "proxy_configuration",
 		})
 		return
 	}
@@ -129,10 +139,11 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		status := http.StatusBadGateway
 		s.writeOpenAIError(w, status, "could not create upstream request", "upstream_error")
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: localModel, HTTPStatus: &status, Outcome: CompletionFailed})
+		s.finishCompletion(r, started, CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: localModel, HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 	upstreamRequest.Header = r.Header.Clone()
+	upstreamRequest.Header.Del("X-Bedrock-Proxy-Run")
 	upstreamRequest.Header.Set("Content-Type", "application/json")
 
 	response, err := s.transport.Do(r.Context(), upstreamRequest)
@@ -143,13 +154,13 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, context.Canceled) || transport.ClassOf(err) == transport.FailureCanceled {
 			outcome = CompletionCanceled
 		}
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: localModel, UpstreamModel: configuredTarget(s.cfg, localModel), HTTPStatus: &status, Outcome: outcome, FailureCategory: transportFailureCategory(outcome)})
+		s.finishCompletion(r, started, CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: localModel, UpstreamModel: configuredTarget(s.cfg, localModel), HTTPStatus: &status, Outcome: outcome, FailureCategory: transportFailureCategory(outcome), FailureClass: transportFailureClass(err)})
 		return
 	}
 	if response == nil {
 		status := http.StatusBadGateway
 		s.writeOpenAIError(w, status, "AWS upstream returned no response", "upstream_error")
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: localModel, UpstreamModel: configuredTarget(s.cfg, localModel), HTTPStatus: &status, Outcome: CompletionFailed})
+		s.finishCompletion(r, started, CompletionResult{Endpoint: "/v1/chat/completions", LocalModel: localModel, UpstreamModel: configuredTarget(s.cfg, localModel), HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 	body := response.Body
@@ -158,10 +169,20 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer body.Close()
 	response.Body = body
+	if response.StatusCode >= 200 && response.StatusCode < 300 {
+		// Bedrock numbers tool calls per response; make repeated index ids unique
+		// so clients can tell one turn's call from the next (see toolcallids.go).
+		response.Body = struct {
+			io.Reader
+			io.Closer
+		}{newToolCallIDRewriter(body, s.toolCallSuffix()), body}
+		body = response.Body
+	}
 
 	copyHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
-	if stream {
+	success := response.StatusCode >= 200 && response.StatusCode < 300
+	if stream && success {
 		s.serveChatStream(w, r, started, localModel, response)
 		return
 	}
@@ -174,16 +195,19 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
 		HTTPStatus:    &status,
 		Outcome:       CompletionFailed,
 	}
-	if copyErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
+	if copyErr == nil && success {
 		result.Outcome = CompletionSucceeded
 	}
 	if copyErr != nil && (errors.Is(copyErr, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled)) {
 		result.Outcome = CompletionCanceled
 	}
+	if result.Outcome == CompletionFailed && !success {
+		classifyUpstreamResponse(&result, status, response.Header, observed, false)
+	}
 	if observed != nil {
 		applyCompletionUsage(&result, parseChatUsage(observed))
 	}
-	s.finishCompletion(started, result)
+	s.finishCompletion(r, started, result)
 }
 
 func (s *Server) transformChatRequest(r *http.Request) (string, []byte, bool, error) {
@@ -272,7 +296,7 @@ func (s *Server) writeTransportError(w http.ResponseWriter, err error) {
 	case transport.FailureCredentialsUnavailable:
 		message = fmt.Sprintf("AWS credentials are unavailable for profile %s", s.cfg.AWS.Profile)
 	}
-	s.writeOpenAIError(w, status, message, "upstream_error")
+	s.writeOpenAIErrorDetails(w, status, message, "upstream_error", nil, transportFailureClass(err))
 }
 
 func transportErrorStatus(err error) int {
@@ -489,6 +513,7 @@ type chatStreamObserver struct {
 	usageInvalid          bool
 	sawDone               bool
 	sawError              bool
+	errorIdentities       []string
 }
 
 func (o *chatStreamObserver) observe(event sseEvent) {
@@ -514,6 +539,7 @@ func (o *chatStreamObserver) observe(event sseEvent) {
 	}
 	if len(envelope.Error) > 0 && string(envelope.Error) != "null" {
 		o.sawError = true
+		o.errorIdentities = append(o.errorIdentities, bodyIdentities(data)...)
 	}
 	if len(envelope.Usage) == 0 || string(envelope.Usage) == "null" {
 		return
@@ -594,8 +620,9 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, started
 	}
 	if result.Outcome == CompletionFailed && observer.sawError {
 		result.FailureCategory = "upstream_error"
+		result.FailureClass, result.UpstreamCode = classifyFailure(status, observer.errorIdentities)
 	}
-	s.finishCompletion(started, result)
+	s.finishCompletion(r, started, result)
 }
 
 var chatUsageKnownFields = map[string]map[string]bool{
@@ -740,7 +767,7 @@ func transportFailureCategory(outcome CompletionOutcome) string {
 	return "transport"
 }
 
-func (s *Server) finishCompletion(started time.Time, result CompletionResult) {
+func (s *Server) finishCompletion(r *http.Request, started time.Time, result CompletionResult) {
 	if result.Outcome != CompletionSucceeded && result.FailureCategory == "" {
 		switch {
 		case result.Outcome == CompletionCanceled:
@@ -754,6 +781,29 @@ func (s *Server) finishCompletion(started time.Time, result CompletionResult) {
 		default:
 			result.FailureCategory = "local_validation"
 		}
+	}
+	if result.Outcome == CompletionCanceled {
+		result.FailureClass = "canceled"
+	}
+	if result.Outcome != CompletionSucceeded && result.FailureClass == "" {
+		switch {
+		case result.FailureCategory == "stream_incomplete":
+			result.FailureClass = "stream_interrupted"
+		case result.FailureCategory == "local_validation":
+			result.FailureClass = "local_validation"
+		case result.HTTPStatus != nil:
+			result.FailureClass = statusClass(*result.HTTPStatus)
+		default:
+			result.FailureClass = "upstream_error"
+		}
+	}
+	if retryable, ok := failureRetryable[result.FailureClass]; ok && result.Outcome != CompletionSucceeded {
+		result.Retryable = &retryable
+	}
+	if generationEndpoint(r.URL.Path) {
+		result.ClientSessionID = validClientID(r.Header.Get("Session-Id"))
+		result.ClientThreadID = codexThreadID(r.Header.Get("X-Codex-Turn-Metadata"))
+		result.ClientRun = validClientID(r.Header.Get("X-Bedrock-Proxy-Run"))
 	}
 	result.Elapsed = time.Since(started)
 	if s.record != nil {

@@ -465,3 +465,81 @@ func TestResponsesStreamingCancellationReachesUpstreamAndClosesBody(t *testing.T
 		t.Fatal("canceled upstream body was not closed")
 	}
 }
+
+// A Responses client can close as soon as it receives a terminal SSE event,
+// while the proxy is still waiting for the upstream connection's EOF.
+func TestResponsesDeliveredTerminalSurvivesClientClose(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		event string
+		want  CompletionOutcome
+	}{
+		{"completed", "response.completed", CompletionSucceeded},
+		{"failed", "response.failed", CompletionFailed},
+		{"incomplete", "response.incomplete", CompletionFailed},
+		{"partial", "response.output_text.delta", CompletionCanceled},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			body := &terminalThenCloseBody{Reader: strings.NewReader(fmt.Sprintf("data: {\"type\":%q,\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":7}}}\n\n", tt.event)), cancel: cancel}
+			fake := &fakeRequestDoer{response: &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: body}}
+			s := NewWithTransport(chatTestConfig(), fake)
+			var result CompletionResult
+			var count int
+			s.SetCompletionRecorder(func(got CompletionResult) { result, count = got, count+1 })
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"coding","input":"hello","stream":true}`)).WithContext(ctx)
+			s.ServeHTTP(recorder, request)
+			if count != 1 || result.Outcome != tt.want {
+				t.Fatalf("outcome=%s count=%d, want %s once", result.Outcome, count, tt.want)
+			}
+			if !strings.Contains(recorder.Body.String(), tt.event) || result.InputTokens == nil || *result.InputTokens != 12 {
+				t.Fatalf("delivered event or usage missing: %+v", result)
+			}
+			if tt.want == CompletionSucceeded && result.FailureCategory != "" {
+				t.Fatalf("successful terminal has failure category %q", result.FailureCategory)
+			}
+		})
+	}
+}
+
+type terminalThenCloseBody struct {
+	*strings.Reader
+	cancel context.CancelFunc
+}
+
+func (b *terminalThenCloseBody) Read(p []byte) (int, error) {
+	if b.Len() == 0 {
+		b.cancel()
+		return 0, context.Canceled
+	}
+	return b.Reader.Read(p)
+}
+
+func (*terminalThenCloseBody) Close() error { return nil }
+
+func TestResponsesUndeliveredTerminalIsNotSuccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake := &fakeRequestDoer{response: &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("data: {\"type\":\"response.completed\"}\n\n"))}}
+	s := NewWithTransport(chatTestConfig(), fake)
+	var result CompletionResult
+	s.SetCompletionRecorder(func(got CompletionResult) { result = got })
+	writer := &cancelingResponseWriter{ResponseRecorder: httptest.NewRecorder(), cancel: cancel}
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"coding","input":"hello","stream":true}`)).WithContext(ctx)
+	s.ServeHTTP(writer, request)
+	if result.Outcome != CompletionCanceled || result.InputTokens != nil {
+		t.Fatalf("undelivered terminal = %+v, want canceled", result)
+	}
+}
+
+type cancelingResponseWriter struct {
+	*httptest.ResponseRecorder
+	cancel context.CancelFunc
+}
+
+func (w *cancelingResponseWriter) Write([]byte) (int, error) {
+	w.cancel()
+	return 0, context.Canceled
+}

@@ -52,6 +52,7 @@ func TestChatStreamingForwardsIncrementallyAndObservesRealOpenAIChunks(t *testin
 	body := &gatedStreamBody{first: []byte(first), rest: []byte(rest), blocked: make(chan struct{}), release: make(chan struct{}), closeCalled: make(chan struct{})}
 	fake := &fakeRequestDoer{response: &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}, "X-Request-Id": []string{"stream-1"}}, Body: body}}
 	s := NewWithTransport(chatTestConfig(), fake)
+	s.toolCallSuffix = func() string { return "t1" }
 	var result CompletionResult
 	var resultCount int
 	s.SetCompletionRecorder(func(got CompletionResult) {
@@ -84,8 +85,11 @@ func TestChatStreamingForwardsIncrementallyAndObservesRealOpenAIChunks(t *testin
 	case <-time.After(time.Second):
 		t.Fatal("stream did not complete after upstream release")
 	}
-	if recorder.Code != http.StatusOK || recorder.Body.String() != first+rest {
-		t.Fatalf("stream response = (%d, %q), want unchanged SSE bytes", recorder.Code, recorder.Body.String())
+	// Every byte is relayed unchanged except the index-style tool call id, which
+	// gets this response's suffix (see toolcallids.go).
+	want := first + strings.Replace(rest, `"id":"call_1"`, `"id":"call_1_t1"`, 1)
+	if recorder.Code != http.StatusOK || recorder.Body.String() != want {
+		t.Fatalf("stream response = (%d, %q), want SSE bytes unchanged apart from the tool call id", recorder.Code, recorder.Body.String())
 	}
 	if recorder.Header().Get("Content-Type") != "text/event-stream" || recorder.Header().Get("X-Request-Id") != "stream-1" {
 		t.Fatalf("stream headers not preserved: %v", recorder.Header())

@@ -27,15 +27,15 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Allow", http.MethodPost)
 		status := http.StatusMethodNotAllowed
 		w.WriteHeader(status)
-		s.finishCompletion(started, CompletionResult{Endpoint: "/v1/responses", HTTPStatus: &status, Outcome: CompletionFailed})
+		s.finishCompletion(r, started, CompletionResult{Endpoint: "/v1/responses", HTTPStatus: &status, Outcome: CompletionFailed})
 		return
 	}
 
-	localModel, payload, stream, err := s.transformResponsesRequest(r)
+	localModel, payload, stream, encryptedReasoning, err := s.transformResponsesRequest(r)
 	if err != nil {
 		status := http.StatusBadRequest
 		result := s.responsesCompletionMetadata(r, localModel)
-		result.Endpoint, result.HTTPStatus, result.Outcome = "/v1/responses", &status, CompletionFailed
+		result.Endpoint, result.HTTPStatus, result.Outcome, result.FailureClass = "/v1/responses", &status, CompletionFailed, "local_validation"
 		var invalid *responsesValidationError
 		if errors.As(err, &invalid) {
 			s.writeOpenAIErrorDetails(w, status, invalid.Message, "invalid_request_error", invalid.Param, invalid.Code)
@@ -45,7 +45,7 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request) {
 		} else {
 			s.writeOpenAIError(w, status, err.Error(), "invalid_request_error")
 		}
-		s.finishCompletion(started, result)
+		s.finishCompletion(r, started, result)
 		return
 	}
 	if s.refuseUnpricedModel(w, r, started, localModel) {
@@ -54,7 +54,9 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request) {
 	if s.transport == nil {
 		status := http.StatusBadGateway
 		s.writeOpenAIError(w, status, "AWS transport is not configured", "upstream_error")
-		s.finishCompletion(started, s.responsesFailureResult(r, localModel, status, CompletionFailed))
+		result := s.responsesFailureResult(r, localModel, status, CompletionFailed)
+		result.FailureCategory, result.FailureClass = "transport", "proxy_configuration"
+		s.finishCompletion(r, started, result)
 		return
 	}
 
@@ -62,11 +64,12 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		status := http.StatusBadGateway
 		s.writeOpenAIError(w, status, "could not create upstream request", "upstream_error")
-		s.finishCompletion(started, s.responsesFailureResult(r, localModel, status, CompletionFailed))
+		s.finishCompletion(r, started, s.responsesFailureResult(r, localModel, status, CompletionFailed))
 		return
 	}
 	upstreamRequest.Header = r.Header.Clone()
 	upstreamRequest.Header.Del("X-Bedrock-Proxy-Catalog")
+	upstreamRequest.Header.Del("X-Bedrock-Proxy-Run")
 	upstreamRequest.Header.Set("Content-Type", "application/json")
 
 	response, err := s.transport.Do(r.Context(), upstreamRequest)
@@ -77,13 +80,15 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, context.Canceled) || transport.ClassOf(err) == transport.FailureCanceled {
 			outcome = CompletionCanceled
 		}
-		s.finishCompletion(started, s.responsesFailureResult(r, localModel, status, outcome))
+		result := s.responsesFailureResult(r, localModel, status, outcome)
+		result.FailureCategory, result.FailureClass = transportFailureCategory(outcome), transportFailureClass(err)
+		s.finishCompletion(r, started, result)
 		return
 	}
 	if response == nil {
 		status := http.StatusBadGateway
 		s.writeOpenAIError(w, status, "AWS upstream returned no response", "upstream_error")
-		s.finishCompletion(started, s.responsesFailureResult(r, localModel, status, CompletionFailed))
+		s.finishCompletion(r, started, s.responsesFailureResult(r, localModel, status, CompletionFailed))
 		return
 	}
 	body := response.Body
@@ -95,7 +100,8 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request) {
 
 	copyHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
-	if stream {
+	success := response.StatusCode >= 200 && response.StatusCode < 300
+	if stream && success {
 		s.serveResponsesStream(w, r, started, localModel, response)
 		return
 	}
@@ -110,54 +116,57 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request) {
 		Outcome:       CompletionFailed,
 	}
 	mergeCompletionMetadata(&result, s.responsesCompletionMetadata(r, localModel))
-	if copyErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
+	if copyErr == nil && success {
 		result.Outcome = CompletionSucceeded
 	}
 	if copyErr != nil && (errors.Is(copyErr, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled)) {
 		result.Outcome = CompletionCanceled
 	}
+	if result.Outcome == CompletionFailed && !success {
+		classifyUpstreamResponse(&result, status, response.Header, observed, encryptedReasoning)
+	}
 	if observed != nil {
 		applyCompletionUsage(&result, parseResponsesUsage(observed))
 		result.FunctionToolCalls = countResponseFunctionCalls(observed)
 	}
-	s.finishCompletion(started, result)
+	s.finishCompletion(r, started, result)
 }
 
-func (s *Server) transformResponsesRequest(r *http.Request) (string, []byte, bool, error) {
+func (s *Server) transformResponsesRequest(r *http.Request) (string, []byte, bool, bool, error) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		return "", nil, false, errors.New("could not read request body")
+		return "", nil, false, false, errors.New("could not read request body")
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	var fields map[string]json.RawMessage
 	if err := dec.Decode(&fields); err != nil || fields == nil {
-		return "", nil, false, errors.New("request body must be a JSON object")
+		return "", nil, false, false, errors.New("request body must be a JSON object")
 	}
 	var extra json.RawMessage
 	if err := dec.Decode(&extra); err != io.EOF {
-		return "", nil, false, errors.New("request body must contain one JSON object")
+		return "", nil, false, false, errors.New("request body must contain one JSON object")
 	}
 
 	modelRaw, ok := fields["model"]
 	if !ok {
-		return "", nil, false, errors.New("model must be a nonempty string")
+		return "", nil, false, false, errors.New("model must be a nonempty string")
 	}
 	var localModel string
 	if err := json.Unmarshal(modelRaw, &localModel); err != nil || strings.TrimSpace(localModel) == "" {
-		return "", nil, false, errors.New("model must be a nonempty string")
+		return "", nil, false, false, errors.New("model must be a nonempty string")
 	}
 	model, ok := s.cfg.Models[localModel]
 	if !ok {
-		return localModel, nil, false, fmt.Errorf("unknown model %q; configured models: %s", localModel, configuredModels(s.cfg))
+		return localModel, nil, false, false, fmt.Errorf("unknown model %q; configured models: %s", localModel, configuredModels(s.cfg))
 	}
 	if err := validateResponsesCapabilities(fields, model); err != nil {
-		return localModel, nil, false, err
+		return localModel, nil, false, false, err
 	}
 
 	var stream bool
 	if raw, ok := fields["stream"]; ok {
 		if err := json.Unmarshal(raw, &stream); err != nil {
-			return localModel, nil, false, errors.New("stream must be a boolean")
+			return localModel, nil, false, false, errors.New("stream must be a boolean")
 		}
 	}
 	fields["model"] = json.RawMessage(strconv.Quote(model.BedrockModelID))
@@ -175,9 +184,27 @@ func (s *Server) transformResponsesRequest(r *http.Request) (string, []byte, boo
 	}
 	transformed, err := json.Marshal(fields)
 	if err != nil {
-		return localModel, nil, stream, errors.New("could not encode request body")
+		return localModel, nil, stream, false, errors.New("could not encode request body")
 	}
-	return localModel, transformed, stream, nil
+	return localModel, transformed, stream, inputCarriesEncryptedReasoning(fields["input"]), nil
+}
+
+// inputCarriesEncryptedReasoning reports whether any input item replays
+// reasoning as encrypted_content, which the upstream may reject as invalid.
+func inputCarriesEncryptedReasoning(raw json.RawMessage) bool {
+	var items []struct {
+		EncryptedContent json.RawMessage `json:"encrypted_content"`
+	}
+	if json.Unmarshal(raw, &items) != nil {
+		return false
+	}
+	for _, item := range items {
+		value := string(bytes.TrimSpace(item.EncryptedContent))
+		if value != "" && value != "null" && value != `""` {
+			return true
+		}
+	}
+	return false
 }
 
 type responsesValidationError struct {
@@ -368,7 +395,7 @@ func normalizedClient(userAgent string) (string, string) {
 	}
 	name, version, found := strings.Cut(fields[0], "/")
 	switch strings.ToLower(name) {
-	case "codex_cli_rs", "codex-cli", "codex":
+	case "codex_cli_rs", "codex_exec", "codex-cli", "codex":
 		if found {
 			return "codex", normalizedVersion(version)
 		}
@@ -471,6 +498,8 @@ type responsesStreamObserver struct {
 	sawTerminal           bool
 	sawSuccess            bool
 	sawFailure            bool
+	errorIdentities       []string
+	incompleteReason      string
 }
 
 func (o *responsesStreamObserver) observe(event sseEvent) {
@@ -494,13 +523,22 @@ func (o *responsesStreamObserver) observe(event sseEvent) {
 	}
 	if len(envelope.Response) > 0 && string(envelope.Response) != "null" {
 		var response struct {
-			Status string                     `json:"status"`
-			Usage  map[string]json.RawMessage `json:"usage"`
+			Status            string                     `json:"status"`
+			Usage             map[string]json.RawMessage `json:"usage"`
+			IncompleteDetails *struct {
+				Reason string `json:"reason"`
+			} `json:"incomplete_details"`
 			Output []struct {
 				Type string `json:"type"`
 			} `json:"output"`
 		}
 		if json.Unmarshal(envelope.Response, &response) == nil {
+			if response.Status == "failed" {
+				o.errorIdentities = append(o.errorIdentities, bodyIdentities(envelope.Response)...)
+			}
+			if response.Status == "incomplete" && response.IncompleteDetails != nil {
+				o.incompleteReason = response.IncompleteDetails.Reason
+			}
 			if response.Usage != nil {
 				o.setUsage(response.Usage)
 			}
@@ -525,6 +563,9 @@ func (o *responsesStreamObserver) observe(event sseEvent) {
 			o.sawSuccess = true
 		}
 	case "response.failed", "response.incomplete", "error":
+		if envelope.Type == "error" {
+			o.errorIdentities = append(o.errorIdentities, bodyIdentities(data)...)
+		}
 		o.sawTerminal = true
 		o.sawFailure = true
 		o.sawSuccess = false
@@ -586,12 +627,25 @@ func (s *Server) serveResponsesStream(w http.ResponseWriter, r *http.Request, st
 		FunctionToolCalls:              observer.functionCalls,
 	}
 	mergeCompletionMetadata(&result, s.responsesCompletionMetadata(r, localModel))
-	normalEnd := copyErr == nil || errors.Is(copyErr, io.EOF)
-	if response.StatusCode >= 200 && response.StatusCode < 300 && normalEnd && observer.sawTerminal && observer.sawSuccess && !observer.sawFailure {
+	// The observer runs only after bytes are written to the client. Codex may
+	// close the connection immediately after response.completed, before upstream
+	// EOF. A delivered terminal event takes precedence over that cancellation.
+	if response.StatusCode >= 200 && response.StatusCode < 300 && observer.sawTerminal && observer.sawSuccess && !observer.sawFailure {
 		result.Outcome = CompletionSucceeded
 	}
-	if errors.Is(r.Context().Err(), context.Canceled) || errors.Is(copyErr, context.Canceled) {
+	if !observer.sawTerminal && (errors.Is(r.Context().Err(), context.Canceled) || errors.Is(copyErr, context.Canceled)) {
 		result.Outcome = CompletionCanceled
 	}
-	s.finishCompletion(started, result)
+	if result.Outcome == CompletionFailed && observer.sawFailure {
+		result.FailureClass, result.UpstreamCode = classifyFailure(status, observer.errorIdentities)
+		// An incomplete response carries a reason rather than an error code.
+		// Output-limit and content-filter stops repeat on retry.
+		if reason := sanitizedCode(observer.incompleteReason); result.UpstreamCode == "" && reason != "" {
+			result.UpstreamCode = reason
+			if reason == "max_output_tokens" || reason == "content_filter" {
+				result.FailureClass = "invalid_request"
+			}
+		}
+	}
+	s.finishCompletion(r, started, result)
 }

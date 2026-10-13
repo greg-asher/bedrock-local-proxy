@@ -93,7 +93,7 @@ func (s *Server) refuseBudget(w http.ResponseWriter, r *http.Request, started ti
 	} else {
 		s.writeOpenAIErrorDetails(w, status, message, "insufficient_quota", nil, "budget_exhausted")
 	}
-	s.finishCompletion(started, CompletionResult{Endpoint: r.URL.Path, LocalModel: localModel, HTTPStatus: &status, Outcome: CompletionFailed, FailureCategory: "budget_exhausted"})
+	s.finishCompletion(r, started, CompletionResult{Endpoint: r.URL.Path, LocalModel: localModel, HTTPStatus: &status, Outcome: CompletionFailed, FailureCategory: "budget_exhausted", FailureClass: "budget_exhausted"})
 }
 
 func formatBudget(value float64) string { return fmt.Sprintf("$%.6f", value) }
